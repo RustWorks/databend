@@ -28,6 +28,11 @@ pub fn add(left: Expression, right: Expression) -> Expression {
     binary_expr(left, "+", right)
 }
 
+/// Sub binary function.
+pub fn sub(left: Expression, right: Expression) -> Expression {
+    binary_expr(left, "-", right)
+}
+
 /// Not.
 pub fn not(other: Expression) -> Expression {
     Expression::UnaryExpression {
@@ -39,7 +44,7 @@ pub fn not(other: Expression) -> Expression {
 // Neg.
 pub fn neg(other: Expression) -> Expression {
     Expression::UnaryExpression {
-        op: "-".to_string(),
+        op: "negate".to_string(),
         expr: Box::new(other),
     }
 }
@@ -71,45 +76,54 @@ pub fn avg(other: Expression) -> Expression {
 
 impl Expression {
     /// And.
+    #[must_use]
     pub fn and(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), "and", other)
     }
 
+    #[must_use]
     pub fn or(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), "or", other)
     }
 
     /// Equal.
+    #[must_use]
     pub fn eq(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), "=", other)
     }
 
     /// Not equal.
+    #[must_use]
     pub fn not_eq(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), "!=", other)
     }
 
     /// Greater than.
+    #[must_use]
     pub fn gt(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), ">", other)
     }
 
     /// Greater than or equal to.
+    #[must_use]
     pub fn gt_eq(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), ">=", other)
     }
 
     /// Less than.
+    #[must_use]
     pub fn lt(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), "<", other)
     }
 
     /// Less than or equal to.
+    #[must_use]
     pub fn lt_eq(&self, other: Expression) -> Expression {
         binary_expr(self.clone(), "<=", other)
     }
 
     /// Alias.
+    #[must_use]
     pub fn alias(&self, alias: &str) -> Expression {
         Expression::Alias(alias.to_string(), Box::from(self.clone()))
     }

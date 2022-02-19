@@ -56,6 +56,16 @@ impl DataSchema {
         &self.fields
     }
 
+    #[inline]
+    pub fn has_field(&self, name: &str) -> bool {
+        for i in 0..self.fields.len() {
+            if self.fields[i].name() == name {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn fields_map(&self) -> BTreeMap<usize, DataField> {
         let x = self.fields().iter().cloned().enumerate();
         x.collect::<BTreeMap<_, _>>()
@@ -116,6 +126,7 @@ impl DataSchema {
     }
 
     /// project will do column pruning.
+    #[must_use]
     pub fn project(&self, projection: Vec<usize>) -> Self {
         let fields = projection
             .iter()
@@ -125,6 +136,7 @@ impl DataSchema {
     }
 
     /// project will do column pruning.
+    #[must_use]
     pub fn project_by_fields(&self, fields: Vec<DataField>) -> Self {
         Self::new_from(fields, self.meta().clone())
     }
@@ -143,6 +155,7 @@ impl DataSchema {
 pub type DataSchemaRef = Arc<DataSchema>;
 
 pub struct DataSchemaRefExt;
+
 impl DataSchemaRefExt {
     pub fn create(fields: Vec<DataField>) -> DataSchemaRef {
         Arc::new(DataSchema::new(fields))
@@ -161,6 +174,7 @@ impl From<&ArrowSchema> for DataSchema {
     }
 }
 
+#[allow(clippy::needless_borrow)]
 impl From<ArrowSchema> for DataSchema {
     fn from(a_schema: ArrowSchema) -> Self {
         (&a_schema).into()

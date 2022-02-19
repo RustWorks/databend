@@ -18,17 +18,21 @@
 pub use db::get_sled_db;
 pub use db::init_sled_db;
 pub use db::init_temp_sled_db;
+pub use openraft;
 pub use sled;
 pub use sled_key_space::SledKeySpace;
 pub use sled_serde::SledOrderedSerde;
 pub use sled_serde::SledRangeSerde;
 pub use sled_serde::SledSerde;
 pub use sled_tree::AsKeySpace;
+pub use sled_tree::AsTxnKeySpace;
 pub use sled_tree::SledTree;
 pub use sled_tree::SledValueToKey;
 pub use sled_tree::TransactionSledTree;
+pub use store::Store;
 
 mod db;
 mod sled_key_space;
 mod sled_serde;
 mod sled_tree;
+mod store;

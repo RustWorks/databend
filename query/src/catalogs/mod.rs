@@ -11,23 +11,20 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 mod catalog;
-mod database;
-mod table;
-mod table_function;
+mod catalog_context;
 mod table_id_ranges;
 mod table_memory_meta;
 
-pub mod backends;
-pub mod impls;
+mod backends;
+mod impls;
 
+pub use backends::MetaBackend;
 pub use catalog::Catalog;
-pub use database::Database;
-pub use table::Table;
-pub use table::TablePtr;
-pub use table::ToReadDataSourcePlan;
-pub use table_function::TableFunction;
+pub use catalog_context::CatalogContext;
+pub use impls::DatabaseCatalog;
+pub use impls::ImmutableCatalog;
+pub use impls::MutableCatalog;
 pub use table_id_ranges::*;
 pub use table_memory_meta::InMemoryMetas;

@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::scalars::function_factory::FunctionFactory;
 use crate::scalars::udfs::exists::ExistsFunction;
-use crate::scalars::CrashMeFunction;
+use crate::scalars::udfs::in_basic::InFunction;
 use crate::scalars::CurrentUserFunction;
 use crate::scalars::DatabaseFunction;
+use crate::scalars::FunctionFactory;
 use crate::scalars::SleepFunction;
 use crate::scalars::ToTypeNameFunction;
 use crate::scalars::UdfExampleFunction;
@@ -26,14 +26,15 @@ use crate::scalars::VersionFunction;
 pub struct UdfFunction;
 
 impl UdfFunction {
-    pub fn register(factory: &mut FunctionFactory) {
+    pub fn register2(factory: &mut FunctionFactory) {
+        factory.register("in", InFunction::<false>::desc());
+        factory.register("not_in", InFunction::<true>::desc());
         factory.register("example", UdfExampleFunction::desc());
+        factory.register("exists", ExistsFunction::desc());
         factory.register("totypename", ToTypeNameFunction::desc());
         factory.register("database", DatabaseFunction::desc());
         factory.register("version", VersionFunction::desc());
         factory.register("current_user", CurrentUserFunction::desc());
         factory.register("sleep", SleepFunction::desc());
-        factory.register("crashme", CrashMeFunction::desc());
-        factory.register("exists", ExistsFunction::desc());
     }
 }

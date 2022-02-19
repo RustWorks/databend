@@ -18,24 +18,25 @@ use std::sync::Arc;
 use common_datavalues::DataSchema;
 use common_datavalues::DataSchemaRef;
 use common_meta_types::CreateDatabaseReq;
+use common_meta_types::DatabaseMeta;
 
 pub type DatabaseOptions = HashMap<String, String>;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct CreateDatabasePlan {
     pub if_not_exists: bool,
+    pub tenant: String,
     pub db: String,
-    pub engine: String,
-    pub options: DatabaseOptions,
+    pub meta: DatabaseMeta,
 }
 
 impl From<CreateDatabasePlan> for CreateDatabaseReq {
     fn from(p: CreateDatabasePlan) -> Self {
         CreateDatabaseReq {
             if_not_exists: p.if_not_exists,
-            db: p.db.clone(),
-            engine: p.engine.to_string(),
-            options: p.options,
+            tenant: p.tenant,
+            db: p.db,
+            meta: p.meta,
         }
     }
 }
@@ -44,9 +45,9 @@ impl From<&CreateDatabasePlan> for CreateDatabaseReq {
     fn from(p: &CreateDatabasePlan) -> Self {
         CreateDatabaseReq {
             if_not_exists: p.if_not_exists,
+            tenant: p.tenant.clone(),
             db: p.db.clone(),
-            engine: p.engine.clone(),
-            options: p.options.clone(),
+            meta: p.meta.clone(),
         }
     }
 }

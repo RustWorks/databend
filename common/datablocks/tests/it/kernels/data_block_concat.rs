@@ -14,29 +14,27 @@
 
 use common_datablocks::*;
 use common_datavalues::prelude::*;
-use common_datavalues::series::Series;
-use common_datavalues::series::SeriesFrom;
 use common_exception::Result;
 
 #[test]
 fn test_data_block_concat() -> Result<()> {
     let schema = DataSchemaRefExt::create(vec![
-        DataField::new("a", DataType::Int64, false),
-        DataField::new("b", DataType::String, false),
+        DataField::new("a", i64::to_data_type()),
+        DataField::new("b", Vu8::to_data_type()),
     ]);
 
     let blocks = vec![
-        DataBlock::create_by_array(schema.clone(), vec![
-            Series::new(vec![1i64, 2, 3]),
-            Series::new(vec!["b1", "b2", "b3"]),
+        DataBlock::create(schema.clone(), vec![
+            Series::from_data(vec![1i64, 2, 3]),
+            Series::from_data(vec!["b1", "b2", "b3"]),
         ]),
-        DataBlock::create_by_array(schema.clone(), vec![
-            Series::new(vec![4i64, 5, 6]),
-            Series::new(vec!["b1", "b2", "b3"]),
+        DataBlock::create(schema.clone(), vec![
+            Series::from_data(vec![4i64, 5, 6]),
+            Series::from_data(vec!["b1", "b2", "b3"]),
         ]),
-        DataBlock::create_by_array(schema, vec![
-            Series::new(vec![7i64, 8, 9]),
-            Series::new(vec!["b1", "b2", "b3"]),
+        DataBlock::create(schema, vec![
+            Series::from_data(vec![7i64, 8, 9]),
+            Series::from_data(vec!["b1", "b2", "b3"]),
         ]),
     ];
 

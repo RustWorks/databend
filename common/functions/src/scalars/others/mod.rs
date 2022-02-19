@@ -1,4 +1,4 @@
-// Copyright 2021 Datafuse Labs.
+// Copyright 2022 Datafuse Labs.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod ignore;
 mod inet_aton;
 mod inet_ntoa;
 mod other;
 mod running_difference_function;
 
+pub use ignore::IgnoreFunction;
 pub use inet_aton::InetAtonFunction;
+pub use inet_aton::TryInetAtonFunction;
 pub use inet_ntoa::InetNtoaFunction;
+pub use inet_ntoa::TryInetNtoaFunction;
 pub use other::OtherFunction;
 pub use running_difference_function::RunningDifferenceFunction;

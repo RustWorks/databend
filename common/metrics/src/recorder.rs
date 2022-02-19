@@ -17,33 +17,16 @@ use std::sync::Once;
 
 use common_infallible::RwLock;
 use common_tracing::tracing;
-use lazy_static::lazy_static;
 use metrics::counter;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_exporter_prometheus::PrometheusHandle;
+use once_cell::sync::Lazy;
 
-lazy_static! {
-    static ref PROMETHEUS_HANDLE: Arc<RwLock<Option<PrometheusHandle>>> =
-        Arc::new(RwLock::new(None));
-}
+static PROMETHEUS_HANDLE: Lazy<Arc<RwLock<Option<PrometheusHandle>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(None)));
 
 pub const LABEL_KEY_TENANT: &str = "tenant";
 pub const LABEL_KEY_CLUSTER: &str = "cluster_name";
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TenantLabel {
-    pub tenant_id: String,
-    pub cluster_id: String,
-}
-
-impl TenantLabel {
-    pub fn new(tenant_id: impl Into<String>, cluster_id: impl Into<String>) -> Self {
-        Self {
-            tenant_id: tenant_id.into(),
-            cluster_id: cluster_id.into(),
-        }
-    }
-}
 
 #[inline]
 pub fn label_counter(name: &'static str, tenant_id: &str, cluster_id: &str) {
@@ -66,11 +49,13 @@ pub fn init_default_metrics_recorder() {
 
 /// Init prometheus recorder.
 fn init_prometheus_recorder() {
-    let recorder = PrometheusBuilder::new().build();
+    let recorder = PrometheusBuilder::new()
+        .build()
+        .expect("failed to build Prometheus recorder");
     let mut h = PROMETHEUS_HANDLE.as_ref().write();
-    *h = Some(recorder.handle());
+    *h = Some(recorder.0.handle());
     metrics::clear_recorder();
-    match metrics::set_boxed_recorder(Box::new(recorder)) {
+    match metrics::set_boxed_recorder(Box::new(recorder.0)) {
         Ok(_) => (),
         Err(err) => tracing::warn!("Install prometheus recorder failed, cause: {}", err),
     };

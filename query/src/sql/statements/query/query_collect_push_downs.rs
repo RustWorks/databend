@@ -25,6 +25,7 @@ use crate::sql::statements::QueryASTIR;
 
 pub struct QueryCollectPushDowns {
     require_columns: HashSet<String>,
+    require_filters: Vec<Expression>,
 }
 
 /// Collect the query need to push downs parts .
@@ -40,12 +41,18 @@ impl QueryASTIRVisitor<QueryCollectPushDowns> for QueryCollectPushDowns {
 
         Ok(())
     }
+
+    fn visit_filter(predicate: &mut Expression, data: &mut QueryCollectPushDowns) -> Result<()> {
+        data.require_filters = vec![predicate.clone()];
+        Self::visit_recursive_expr(predicate, data)
+    }
 }
 
 impl QueryCollectPushDowns {
     pub fn collect_extras(ir: &mut QueryASTIR, schema: &mut JoinedSchema) -> Result<()> {
         let mut push_downs_data = Self {
             require_columns: HashSet::new(),
+            require_filters: vec![],
         };
         QueryCollectPushDowns::visit(ir, &mut push_downs_data)?;
         push_downs_data.collect_push_downs(schema)
@@ -58,8 +65,7 @@ impl QueryCollectPushDowns {
 
             schema.set_table_push_downs(index, Extras {
                 projection: Some(projection),
-                // TODO:
-                filters: vec![],
+                filters: self.require_filters.clone(),
                 limit: None,
                 order_by: vec![],
             });
@@ -81,7 +87,7 @@ impl QueryCollectPushDowns {
         let mut smallest_size = usize::MAX;
         let columns_desc = table_desc.get_columns_desc();
         for (column_index, column_desc) in columns_desc.iter().enumerate() {
-            if let Ok(bytes) = column_desc.data_type.numeric_byte_size() {
+            if let Ok(bytes) = column_desc.data_type.data_type_id().numeric_byte_size() {
                 if smallest_size > bytes {
                     smallest_size = bytes;
                     smallest_index = column_index;

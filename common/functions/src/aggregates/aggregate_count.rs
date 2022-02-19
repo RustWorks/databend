@@ -17,23 +17,26 @@ use std::fmt;
 use std::sync::Arc;
 
 use bytes::BytesMut;
+use common_arrow::arrow::bitmap::Bitmap;
 use common_datavalues::prelude::*;
 use common_exception::Result;
 use common_io::prelude::*;
 
+use super::aggregate_function::AggregateFunction;
+use super::aggregate_function_factory::AggregateFunctionDescription;
 use super::StateAddr;
-use crate::aggregates::aggregate_function_factory::AggregateFunctionDescription;
 use crate::aggregates::aggregator_common::assert_variadic_arguments;
-use crate::aggregates::AggregateFunction;
 
 pub struct AggregateCountState {
     count: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct AggregateCountFunction {
     display_name: String,
     arguments: Vec<DataField>,
+    nullable: bool,
 }
 
 impl AggregateCountFunction {
@@ -45,8 +48,22 @@ impl AggregateCountFunction {
         assert_variadic_arguments(display_name, arguments.len(), (0, 1))?;
         Ok(Arc::new(AggregateCountFunction {
             display_name: display_name.to_string(),
+            nullable: false,
             arguments,
         }))
+    }
+
+    pub fn try_create_own(
+        display_name: &str,
+        _params: Vec<DataValue>,
+        arguments: Vec<DataField>,
+    ) -> Result<Self> {
+        assert_variadic_arguments(display_name, arguments.len(), (0, 1))?;
+        Ok(AggregateCountFunction {
+            display_name: display_name.to_string(),
+            arguments,
+            nullable: false,
+        })
     }
 
     pub fn desc() -> AggregateFunctionDescription {
@@ -59,12 +76,8 @@ impl AggregateFunction for AggregateCountFunction {
         "AggregateCountFunction"
     }
 
-    fn return_type(&self) -> Result<DataType> {
-        Ok(DataType::UInt64)
-    }
-
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
+    fn return_type(&self) -> Result<DataTypePtr> {
+        Ok(u64::to_data_type())
     }
 
     fn init_state(&self, place: StateAddr) {
@@ -75,13 +88,20 @@ impl AggregateFunction for AggregateCountFunction {
         Layout::new::<AggregateCountState>()
     }
 
-    fn accumulate(&self, place: StateAddr, arrays: &[Series], input_rows: usize) -> Result<()> {
+    fn accumulate(
+        &self,
+        place: StateAddr,
+        _columns: &[ColumnRef],
+        validity: Option<&Bitmap>,
+        input_rows: usize,
+    ) -> Result<()> {
         let state = place.get::<AggregateCountState>();
-        if self.arguments.is_empty() {
-            state.count += input_rows as u64;
-        } else {
-            state.count += (input_rows - arrays[0].null_count()) as u64;
-        }
+        let nulls = match validity {
+            Some(b) => b.null_count(),
+            None => 0,
+        };
+
+        state.count += (input_rows - nulls) as u64;
         Ok(())
     }
 
@@ -89,31 +109,30 @@ impl AggregateFunction for AggregateCountFunction {
         &self,
         places: &[StateAddr],
         offset: usize,
-        arrays: &[Series],
+        columns: &[ColumnRef],
         _input_rows: usize,
     ) -> Result<()> {
-        if self.arguments.is_empty() {
-            for place in places.iter() {
-                let place = place.next(offset);
-                let state = place.get::<AggregateCountState>();
-                state.count += 1;
+        let validity = match columns.len() {
+            0 => None,
+            _ => {
+                let (_, validity) = columns[0].validity();
+                validity
             }
-            return Ok(());
-        }
+        };
 
-        match arrays[0].get_array_ref().validity() {
-            None => {
-                for place in places.iter() {
-                    let place = place.next(offset);
-                    let state = place.get::<AggregateCountState>();
-                    state.count += 1;
+        match validity {
+            Some(v) => {
+                for (valid, place) in v.iter().zip(places.iter()) {
+                    if valid {
+                        let state = place.next(offset).get::<AggregateCountState>();
+                        state.count += 1;
+                    }
                 }
             }
-            Some(nullable_marks) => {
-                for (row, place) in places.iter().enumerate() {
-                    let place = place.next(offset);
+            None => {
+                for place in places {
                     let state = place.get::<AggregateCountState>();
-                    state.count += nullable_marks.get_bit(row) as u64;
+                    state.count += 1;
                 }
             }
         }
@@ -121,14 +140,22 @@ impl AggregateFunction for AggregateCountFunction {
         Ok(())
     }
 
+    fn accumulate_row(&self, place: StateAddr, _columns: &[ColumnRef], _row: usize) -> Result<()> {
+        let state = place.get::<AggregateCountState>();
+        state.count += 1;
+        Ok(())
+    }
+
     fn serialize(&self, place: StateAddr, writer: &mut BytesMut) -> Result<()> {
         let state = place.get::<AggregateCountState>();
-        writer.write_uvarint(state.count)
+        serialize_into_buf(writer, &state.count)
     }
 
     fn deserialize(&self, place: StateAddr, reader: &mut &[u8]) -> Result<()> {
         let state = place.get::<AggregateCountState>();
-        reader.read_to_uvarint(&mut state.count)
+        state.count = deserialize_from_slice(reader)?;
+
+        Ok(())
     }
 
     fn merge(&self, place: StateAddr, rhs: StateAddr) -> Result<()> {
@@ -139,9 +166,22 @@ impl AggregateFunction for AggregateCountFunction {
         Ok(())
     }
 
-    fn merge_result(&self, place: StateAddr) -> Result<DataValue> {
+    fn merge_result(&self, place: StateAddr, array: &mut dyn MutableColumn) -> Result<()> {
+        let builder: &mut MutablePrimitiveColumn<u64> = Series::check_get_mutable_column(array)?;
         let state = place.get::<AggregateCountState>();
-        Ok(state.count.into())
+        builder.append_value(state.count);
+        Ok(())
+    }
+
+    fn get_own_null_adaptor(
+        &self,
+        _nested_function: super::AggregateFunctionRef,
+        _params: Vec<DataValue>,
+        _arguments: Vec<DataField>,
+    ) -> Result<Option<super::AggregateFunctionRef>> {
+        let mut f = self.clone();
+        f.nullable = true;
+        Ok(Some(Arc::new(f)))
     }
 }
 

@@ -19,7 +19,9 @@ use std::fmt::Formatter;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use common_datavalues::DataSchema;
+use common_datavalues::chrono::DateTime;
+use common_datavalues::chrono::Utc;
+use common_datavalues::prelude::*;
 use maplit::hashmap;
 
 use crate::database::DatabaseNameIdent;
@@ -51,19 +53,25 @@ impl TableIdent {
 
 impl Display for TableIdent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "id:{}, ver:{}", self.table_id, self.version)
+        write!(f, "table_id:{}, ver:{}", self.table_id, self.version)
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct TableNameIndent {
+    pub tenant: String,
     pub db_name: String,
     pub table_name: String,
 }
 
 impl TableNameIndent {
-    pub fn new(db_name: impl Into<String>, table_name: impl Into<String>) -> TableNameIndent {
+    pub fn new(
+        tenant: impl Into<String>,
+        db_name: impl Into<String>,
+        table_name: impl Into<String>,
+    ) -> TableNameIndent {
         TableNameIndent {
+            tenant: tenant.into(),
             db_name: db_name.into(),
             table_name: table_name.into(),
         }
@@ -97,7 +105,9 @@ pub struct TableInfo {
 pub struct TableMeta {
     pub schema: Arc<DataSchema>,
     pub engine: String,
+    pub engine_options: HashMap<String, String>,
     pub options: HashMap<String, String>,
+    pub created_on: DateTime<Utc>,
 }
 
 impl TableInfo {
@@ -135,6 +145,11 @@ impl TableInfo {
         &self.meta.engine
     }
 
+    pub fn engine_options(&self) -> &HashMap<String, String> {
+        &self.meta.engine_options
+    }
+
+    #[must_use]
     pub fn set_schema(mut self, schema: Arc<DataSchema>) -> TableInfo {
         self.meta.schema = schema;
         self
@@ -146,7 +161,9 @@ impl Default for TableMeta {
         TableMeta {
             schema: Arc::new(DataSchema::empty()),
             engine: "".to_string(),
+            engine_options: HashMap::new(),
             options: HashMap::new(),
+            created_on: Utc::now(),
         }
     }
 }
@@ -155,8 +172,8 @@ impl Display for TableMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Engine: {}, Schema: {}, Options: {:?}",
-            self.engine, self.schema, self.options
+            "Engine: {}={:?}, Schema: {}, Options: {:?} CreatedOn: {:?}",
+            self.engine, self.engine_options, self.schema, self.options, self.created_on
         )
     }
 }
@@ -174,6 +191,7 @@ impl Display for TableInfo {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct CreateTableReq {
     pub if_not_exists: bool,
+    pub tenant: String,
     pub db: String,
     pub table: String,
     pub table_meta: TableMeta,
@@ -187,6 +205,7 @@ pub struct CreateTableReply {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct DropTableReq {
     pub if_exists: bool,
+    pub tenant: String,
     pub db: String,
     pub table: String,
 }
@@ -236,16 +255,20 @@ impl Deref for GetTableReq {
     }
 }
 
-impl From<(&str, &str)> for GetTableReq {
-    fn from(db_table: (&str, &str)) -> Self {
-        Self::new(db_table.0, db_table.1)
+impl From<(&str, &str, &str)> for GetTableReq {
+    fn from(db_table: (&str, &str, &str)) -> Self {
+        Self::new(db_table.0, db_table.1, db_table.2)
     }
 }
 
 impl GetTableReq {
-    pub fn new(db_name: impl Into<String>, table_name: impl Into<String>) -> GetTableReq {
+    pub fn new(
+        tenant: impl Into<String>,
+        db_name: impl Into<String>,
+        table_name: impl Into<String>,
+    ) -> GetTableReq {
         GetTableReq {
-            inner: TableNameIndent::new(db_name, table_name),
+            inner: TableNameIndent::new(tenant, db_name, table_name),
         }
     }
 }
@@ -264,9 +287,10 @@ impl Deref for ListTableReq {
 }
 
 impl ListTableReq {
-    pub fn new(db_name: impl Into<String>) -> ListTableReq {
+    pub fn new(tenant: impl Into<String>, db_name: impl Into<String>) -> ListTableReq {
         ListTableReq {
             inner: DatabaseNameIdent {
+                tenant: tenant.into(),
                 db_name: db_name.into(),
             },
         }

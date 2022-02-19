@@ -13,21 +13,15 @@
 // limitations under the License.
 
 use std::fmt;
+use std::sync::Arc;
 
-use common_arrow::arrow::array::StructArray;
-use common_arrow::arrow::datatypes::DataType as ArrowType;
-use common_datavalues::arrays::DFStructArray;
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::series::IntoSeries;
-use common_datavalues::DataField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
+use common_datavalues::StructColumn;
+use common_datavalues::StructType;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct TupleFunction {
@@ -42,8 +36,11 @@ impl TupleFunction {
     }
 
     pub fn desc() -> FunctionDescription {
-        FunctionDescription::creator(Box::new(Self::try_create_func))
-            .features(FunctionFeatures::default().deterministic())
+        FunctionDescription::creator(Box::new(Self::try_create_func)).features(
+            FunctionFeatures::default()
+                .deterministic()
+                .variadic_arguments(1, usize::MAX),
+        )
     }
 }
 
@@ -52,43 +49,43 @@ impl Function for TupleFunction {
         "TupleFunction"
     }
 
-    fn num_arguments(&self) -> usize {
-        0
-    }
-
-    fn variadic_arguments(&self) -> Option<(usize, usize)> {
-        Some((1, usize::MAX))
-    }
-
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        let fields = args
-            .iter()
-            .enumerate()
-            .map(|(i, x)| DataField::new(format!("item_{}", i).as_str(), x.clone(), false))
+    fn return_type(
+        &self,
+        args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        let names = (0..args.len())
+            .map(|i| format!("item_{}", i))
             .collect::<Vec<_>>();
-        Ok(DataType::Struct(fields))
+        let types = args.iter().map(|x| (*x).clone()).collect::<Vec<_>>();
+        let t = Arc::new(StructType::create(names, types));
+        Ok(t)
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
+    fn eval(
+        &self,
+        columns: &common_datavalues::ColumnsWithField,
+        _input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
+        let mut cols = vec![];
+        let mut types = vec![];
 
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        let mut arrays = vec![];
-        let mut fields = vec![];
-        for (i, x) in columns.iter().enumerate() {
-            let xfield = x.field();
-            let field = DataField::new(
-                format!("item_{}", i).as_str(),
-                xfield.data_type().clone(),
-                xfield.is_nullable(),
-            );
-            fields.push(field.to_arrow());
-            arrays.push(x.column().to_array()?.get_array_ref());
+        let names = (0..columns.len())
+            .map(|i| format!("item_{}", i))
+            .collect::<Vec<_>>();
+
+        for c in columns {
+            cols.push(c.column().clone());
+            types.push(c.data_type().clone());
         }
-        let arr: DFStructArray =
-            StructArray::from_data(ArrowType::Struct(fields), arrays, None).into();
-        Ok(arr.into_series().into())
+
+        let t = Arc::new(StructType::create(names, types));
+
+        let arr: StructColumn = StructColumn::from_data(cols, t);
+        Ok(Arc::new(arr))
+    }
+
+    fn passthrough_null(&self) -> bool {
+        false
     }
 }
 

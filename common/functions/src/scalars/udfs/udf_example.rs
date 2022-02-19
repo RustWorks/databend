@@ -14,16 +14,13 @@
 
 use std::fmt;
 
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
+use common_datavalues::BooleanType;
 use common_datavalues::DataValue;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct UdfExampleFunction {
@@ -48,23 +45,21 @@ impl Function for UdfExampleFunction {
         "UdfExampleFunction"
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
+    fn return_type(
+        &self,
+        _args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        Ok(BooleanType::arc())
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, _columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
-        Ok(DataColumn::Constant(
-            DataValue::Boolean(Some(true)),
-            input_rows,
-        ))
-    }
-
-    fn num_arguments(&self) -> usize {
-        0
+    fn eval(
+        &self,
+        _columns: &common_datavalues::ColumnsWithField,
+        input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
+        let value = DataValue::Boolean(true);
+        let data_type = BooleanType::arc();
+        value.as_const_column(&data_type, input_rows)
     }
 }
 

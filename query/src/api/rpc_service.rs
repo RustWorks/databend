@@ -22,6 +22,7 @@ use common_base::tokio::net::TcpListener;
 use common_base::tokio::sync::Notify;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_tracing::tracing;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Identity;
 use tonic::transport::Server;
@@ -34,9 +35,9 @@ use crate::servers::Server as DatabendQueryServer;
 use crate::sessions::SessionManager;
 
 pub struct RpcService {
-    pub(crate) sessions: Arc<SessionManager>,
-    pub(crate) abort_notify: Arc<Notify>,
-    pub(crate) dispatcher: Arc<DatabendQueryFlightDispatcher>,
+    pub sessions: Arc<SessionManager>,
+    pub abort_notify: Arc<Notify>,
+    pub dispatcher: Arc<DatabendQueryFlightDispatcher>,
 }
 
 impl RpcService {
@@ -50,12 +51,7 @@ impl RpcService {
 
     async fn listener_tcp(listening: SocketAddr) -> Result<(TcpListenerStream, SocketAddr)> {
         let listener = TcpListener::bind(listening).await.map_err(|e| {
-            ErrorCode::TokioError(format!(
-                "{{{}:{}}} {}",
-                listening.ip().to_string(),
-                listening.port().to_string(),
-                e
-            ))
+            ErrorCode::TokioError(format!("{{{}:{}}} {}", listening.ip(), listening.port(), e))
         })?;
         let listener_addr = listener.local_addr()?;
         Ok((TcpListenerStream::new(listener), listener_addr))
@@ -83,19 +79,15 @@ impl RpcService {
         let conf = self.sessions.get_conf();
         let builder = Server::builder();
         let mut builder = if conf.tls_rpc_server_enabled() {
-            log::info!("databend query tls rpc enabled");
+            tracing::info!("databend query tls rpc enabled");
             builder
                 .tls_config(Self::server_tls_config(conf).await.map_err(|e| {
                     ErrorCode::TLSConfigurationFailure(format!(
-                        "failed to load server tls config: {}",
-                        e.to_string()
+                        "failed to load server tls config: {e}",
                     ))
                 })?)
                 .map_err(|e| {
-                    ErrorCode::TLSConfigurationFailure(format!(
-                        "failed to invoke tls_config: {}",
-                        e.to_string()
-                    ))
+                    ErrorCode::TLSConfigurationFailure(format!("failed to invoke tls_config: {e}",))
                 })?
         } else {
             builder

@@ -42,22 +42,24 @@ impl Interpreter for AlterUserInterpreter {
         "AlterUserInterpreter"
     }
 
-    #[tracing::instrument(level = "info", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
     async fn execute(
         &self,
         _input_stream: Option<SendableDataBlockStream>,
     ) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
-        let user_mgr = self.ctx.get_sessions_manager().get_user_manager();
-        //TODO:alter current user
-        user_mgr
-            .update_user(
-                plan.name.as_str(),
-                plan.hostname.as_str(),
-                Some(plan.new_auth_type),
-                Some(plan.new_password),
-            )
-            .await?;
+        let tenant = self.ctx.get_tenant();
+        let user_mgr = self.ctx.get_user_manager();
+        if let Some(new_auth_info) = plan.auth_info {
+            user_mgr
+                .update_user(
+                    &tenant,
+                    plan.name.as_str(),
+                    plan.hostname.as_str(),
+                    new_auth_info,
+                )
+                .await?;
+        }
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),

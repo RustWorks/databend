@@ -17,8 +17,14 @@ common-infallible = { path = "../infallible" }
 common-tracing = { path = "../tracing" }
 
 # Crates.io dependencies
-lazy_static = "1.4.0"
-metrics = "0.17.0"
-metrics-exporter-prometheus = "0.6.0"
+once_cell = "1.9.0"
+metrics = "0.18.0"
+metrics-exporter-prometheus = "0.8.0"
 prometheus-parse = "0.2.2"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.136", features = ["derive"] }
+
+[dev-dependencies.tokio]
+version = "1.16.1"
+default-features = false
+features = ["io-util", "net", "sync", "rt-multi-thread", "macros"]
+

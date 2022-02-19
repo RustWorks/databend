@@ -14,11 +14,13 @@
 
 use std::fmt;
 
-use async_raft::raft::MembershipConfig;
-use async_raft::LogId;
-use common_exception::ErrorCode;
+use common_meta_sled_store::openraft;
+use common_meta_sled_store::openraft::EffectiveMembership;
 use common_meta_sled_store::sled;
 use common_meta_sled_store::SledOrderedSerde;
+use common_meta_types::anyerror::AnyError;
+use common_meta_types::MetaStorageError;
+use openraft::LogId;
 use serde::Deserialize;
 use serde::Serialize;
 use sled::IVec;
@@ -38,7 +40,7 @@ pub enum StateMachineMetaKey {
 pub enum StateMachineMetaValue {
     LogId(LogId),
     Bool(bool),
-    Membership(MembershipConfig),
+    Membership(EffectiveMembership),
 }
 
 impl fmt::Display for StateMachineMetaKey {
@@ -58,7 +60,7 @@ impl fmt::Display for StateMachineMetaKey {
 }
 
 impl SledOrderedSerde for StateMachineMetaKey {
-    fn ser(&self) -> Result<IVec, ErrorCode> {
+    fn ser(&self) -> Result<IVec, MetaStorageError> {
         let i = match self {
             StateMachineMetaKey::LastApplied => 1,
             StateMachineMetaKey::Initialized => 2,
@@ -68,7 +70,7 @@ impl SledOrderedSerde for StateMachineMetaKey {
         Ok(IVec::from(&[i]))
     }
 
-    fn de<V: AsRef<[u8]>>(v: V) -> Result<Self, ErrorCode>
+    fn de<V: AsRef<[u8]>>(v: V) -> Result<Self, MetaStorageError>
     where Self: Sized {
         let slice = v.as_ref();
         if slice[0] == 1 {
@@ -79,6 +81,8 @@ impl SledOrderedSerde for StateMachineMetaKey {
             return Ok(StateMachineMetaKey::LastMembership);
         }
 
-        Err(ErrorCode::MetaStoreDamaged("invalid key IVec"))
+        Err(MetaStorageError::SledError(AnyError::error(
+            "invalid key IVec",
+        )))
     }
 }

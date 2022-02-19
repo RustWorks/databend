@@ -20,16 +20,38 @@ use common_io::prelude::BinaryRead;
 use crate::prelude::*;
 
 pub struct StringDeserializer {
-    pub builder: StringArrayBuilder,
+    pub buffer: Vec<u8>,
+    pub builder: MutableStringColumn,
+}
+
+impl StringDeserializer {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buffer: Vec::new(),
+            builder: MutableStringColumn::with_capacity(capacity),
+        }
+    }
 }
 
 impl TypeDeserializer for StringDeserializer {
+    // See GroupHash.rs for StringColumn
+    #[allow(clippy::uninit_vec)]
     fn de(&mut self, reader: &mut &[u8]) -> Result<()> {
         let offset: u64 = reader.read_uvarint()?;
-        let mut values: Vec<u8> = Vec::with_capacity(offset as usize);
-        reader.read_exact(&mut values)?;
-        self.builder.append_value(reader);
+
+        self.buffer.clear();
+        self.buffer.reserve(offset as usize);
+        unsafe {
+            self.buffer.set_len(offset as usize);
+        }
+
+        reader.read_exact(&mut self.buffer)?;
+        self.builder.append_value(&self.buffer);
         Ok(())
+    }
+
+    fn de_default(&mut self) {
+        self.builder.append_value("");
     }
 
     fn de_batch(&mut self, reader: &[u8], step: usize, rows: usize) -> Result<()> {
@@ -45,11 +67,7 @@ impl TypeDeserializer for StringDeserializer {
         Ok(())
     }
 
-    fn de_null(&mut self) {
-        self.builder.append_null()
-    }
-
-    fn finish_to_series(&mut self) -> Series {
-        self.builder.finish().into_series()
+    fn finish_to_column(&mut self) -> ColumnRef {
+        self.builder.to_column()
     }
 }

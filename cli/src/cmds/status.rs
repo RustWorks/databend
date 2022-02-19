@@ -27,14 +27,15 @@ use std::time;
 
 use async_trait::async_trait;
 use common_base::tokio::time::Duration;
+use common_tracing::tracing;
 use databend_meta::configs::Config as MetaConfig;
 use databend_query::configs::Config as QueryConfig;
 use libc::pid_t;
-use log::info;
 use nix::unistd::Pid;
 use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
+use sysinfo::Pid as SysPid;
 use sysinfo::System;
 use sysinfo::SystemExt;
 
@@ -89,8 +90,7 @@ async fn check_health(
     if resp.is_err() || !resp.unwrap().status().is_success() {
         async_std::task::sleep(duration).await;
         return Err(CliError::Unknown(format!(
-            "cannot connect to healthiness probe: {}",
-            url
+            "cannot connect to healthiness probe: {url}",
         )));
     } else {
         Ok(())
@@ -204,12 +204,12 @@ impl LocalRuntime for LocalDashboardConfig {
 
         if !Path::new(log_dir.as_str()).exists() {
             std::fs::create_dir(Path::new(log_dir.as_str()))
-                .unwrap_or_else(|_| panic!("cannot create directory {}", log_dir));
+                .unwrap_or_else(|_| panic!("cannot create directory {log_dir}"));
         }
 
-        let out_file = File::create(format!("{}/std_out.log", log_dir).as_str())
+        let out_file = File::create(format!("{log_dir}/std_out.log").as_str())
             .expect("couldn't create stdout file");
-        let err_file = File::create(format!("{}/std_err.log", log_dir).as_str())
+        let err_file = File::create(format!("{log_dir}/std_err.log").as_str())
             .expect("couldn't create stderr file");
         // configure runtime by process local env settings
         command
@@ -228,7 +228,7 @@ impl LocalRuntime for LocalDashboardConfig {
             .stdout(unsafe { Stdio::from_raw_fd(out_file.into_raw_fd()) })
             .stderr(unsafe { Stdio::from_raw_fd(err_file.into_raw_fd()) });
         // logging debug
-        info!("executing command {:?}", command);
+        tracing::info!("executing command {:?}", command);
         Ok(command)
     }
 
@@ -242,7 +242,7 @@ impl LocalRuntime for LocalDashboardConfig {
         }
         let s = System::new_all();
         let pid = self.pid.unwrap();
-        return s.process(pid).is_none();
+        return s.process(SysPid::from(pid)).is_none();
     }
 
     async fn verify(&self, _retries: Option<u32>, _duration: Option<Duration>) -> Result<()> {
@@ -303,8 +303,8 @@ impl LocalRuntime for LocalMetaConfig {
                 conf.log_dir,
             )
             .env(
-                databend_meta::configs::config::METASRV_FLIGHT_API_ADDRESS,
-                conf.flight_api_address,
+                databend_meta::configs::config::METASRV_GRPC_API_ADDRESS,
+                conf.grpc_api_address,
             )
             .env(
                 databend_meta::configs::config::ADMIN_API_ADDRESS,
@@ -315,12 +315,12 @@ impl LocalRuntime for LocalMetaConfig {
                 conf.metric_api_address,
             )
             .env(
-                databend_meta::configs::config::FLIGHT_TLS_SERVER_CERT,
-                conf.flight_tls_server_cert,
+                databend_meta::configs::config::GRPC_TLS_SERVER_CERT,
+                conf.grpc_tls_server_cert,
             )
             .env(
-                databend_meta::configs::config::FLIGHT_TLS_SERVER_KEY,
-                conf.flight_tls_server_key,
+                databend_meta::configs::config::GRPC_TLS_SERVER_KEY,
+                conf.grpc_tls_server_key,
             )
             .env(
                 databend_meta::configs::config::ADMIN_TLS_SERVER_CERT,
@@ -343,13 +343,17 @@ impl LocalRuntime for LocalMetaConfig {
                 conf.raft_config.raft_api_port.to_string(),
             )
             .env(
-                common_meta_raft_store::config::KVSRV_API_HOST,
-                conf.raft_config.raft_api_host,
+                common_meta_raft_store::config::KVSRV_LISTEN_HOST,
+                conf.raft_config.raft_listen_host,
+            )
+            .env(
+                common_meta_raft_store::config::KVSRV_ADVERTISE_HOST,
+                conf.raft_config.raft_advertise_host,
             )
             .stdout(unsafe { Stdio::from_raw_fd(out_file.into_raw_fd()) })
             .stderr(unsafe { Stdio::from_raw_fd(err_file.into_raw_fd()) });
         // logging debug
-        info!("executing command {:?}", command);
+        tracing::info!("executing command {:?}", command);
         Ok(command)
     }
 
@@ -366,15 +370,15 @@ impl LocalRuntime for LocalMetaConfig {
         return portpicker::is_free(self.config.raft_config.raft_api_port as u16)
             && portpicker::is_free(
                 self.config
-                    .flight_api_address
+                    .grpc_api_address
                     .parse::<SocketAddr>()
                     .expect(&*format!(
                         "cannot parse meta server address {} ",
-                        self.config.flight_api_address
+                        self.config.grpc_api_address
                     ))
                     .port(),
             )
-            && s.process(pid).is_none();
+            && s.process(SysPid::from(pid)).is_none();
     }
     // retrieve the configured url for health check
     // TODO(zhihanz): http TLS endpoint
@@ -519,7 +523,7 @@ impl LocalRuntime for LocalQueryConfig {
             .stdout(unsafe { Stdio::from_raw_fd(out_file.into_raw_fd()) })
             .stderr(unsafe { Stdio::from_raw_fd(err_file.into_raw_fd()) });
         // logging debug
-        info!("executing command {:?}", command);
+        tracing::info!("executing command {:?}", command);
         Ok(command)
     }
     fn set_pid(&mut self, id: pid_t) {
@@ -533,7 +537,7 @@ impl LocalRuntime for LocalQueryConfig {
         let pid = self.pid.unwrap();
         portpicker::is_free(self.config.query.mysql_handler_port)
             && portpicker::is_free(self.config.query.clickhouse_handler_port)
-            && s.process(pid).is_none()
+            && s.process(SysPid::from(pid)).is_none()
     }
     // retrieve the configured url for health check
     fn get_health_probe(&self) -> (reqwest::Client, String) {
@@ -555,7 +559,7 @@ impl LocalRuntime for LocalQueryConfig {
 impl Status {
     pub fn read(conf: Config) -> Result<Self> {
         let status_path = format!("{}/.status.json", conf.databend_dir);
-        log::info!("{}", status_path.as_str());
+        tracing::info!("{}", status_path.as_str());
         let local_config_dir = format!("{}/configs/local", conf.databend_dir);
         std::fs::create_dir_all(local_config_dir.as_str())
             .expect("cannot create dir to store local profile");
@@ -683,8 +687,7 @@ impl Status {
         if !Path::new(meta_file.as_str()).exists() {
             return None;
         }
-        let file =
-            File::open(meta_file.to_string()).expect(&*format!("cannot read from {}", meta_file));
+        let file = File::open(&meta_file).expect(&*format!("cannot read from {}", meta_file));
         let reader = BufReader::new(file);
         return Some((
             meta_file.to_string(),
@@ -712,8 +715,7 @@ impl Status {
         if !Path::new(dashboard.as_str()).exists() {
             return None;
         }
-        let file =
-            File::open(dashboard.to_string()).expect(&*format!("cannot read from {}", dashboard));
+        let file = File::open(&dashboard).expect(&*format!("cannot read from {}", dashboard));
         let reader = BufReader::new(file);
         return Some((
             dashboard.to_string(),
@@ -860,7 +862,7 @@ impl Status {
 
     pub fn find_unused_local_port() -> String {
         format!(
-            "0.0.0.0:{}",
+            "127.0.0.1:{}",
             portpicker::pick_unused_port().expect("cannot find a non-occupied port")
         )
     }

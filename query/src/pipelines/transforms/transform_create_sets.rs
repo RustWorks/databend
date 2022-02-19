@@ -25,6 +25,7 @@ use common_infallible::Mutex;
 use common_planners::Expression;
 use common_streams::SendableDataBlockStream;
 use common_streams::SubQueriesStream;
+use common_tracing::tracing;
 use futures::future::join_all;
 use futures::future::BoxFuture;
 use futures::future::JoinAll;
@@ -118,6 +119,7 @@ impl Processor for CreateSetsTransform {
         self
     }
 
+    #[tracing::instrument(level = "debug", name = "create_sets_execute", skip(self))]
     async fn execute(&self) -> Result<SendableDataBlockStream> {
         let data = self.execute_sub_queries()?.await;
 
@@ -155,6 +157,7 @@ impl<'a> SubQueriesPuller<'a> {
         self.expressions.len()
     }
 
+    #[tracing::instrument(level = "debug", skip(self))]
     pub fn take_subquery_data(
         &mut self,
         pos: usize,
@@ -168,7 +171,7 @@ impl<'a> SubQueriesPuller<'a> {
 
     fn init(&mut self) -> Result<()> {
         for query_expression in &self.expressions {
-            let subquery_ctx = QueryContext::new(self.ctx.clone());
+            let subquery_ctx = QueryContext::create_from(self.ctx.clone());
 
             match query_expression {
                 Expression::Subquery { query_plan, .. } => {
@@ -211,16 +214,16 @@ impl<'a> SubQueriesPuller<'a> {
 
                 #[allow(clippy::needless_range_loop)]
                 for column_index in 0..data_block.num_columns() {
-                    let series = data_block.column(column_index).to_array()?;
-                    let mut values = series.to_values()?;
+                    let col = data_block.column(column_index);
+                    let mut values = col.to_values();
                     columns[column_index].1.append(&mut values)
                 }
             }
 
             let mut struct_fields = Vec::with_capacity(columns.len());
 
-            for (data_type, values) in columns {
-                struct_fields.push(DataValue::List(Some(values), data_type))
+            for (_, values) in columns {
+                struct_fields.push(DataValue::Array(values))
             }
 
             match struct_fields.len() {
@@ -248,9 +251,8 @@ impl<'a> SubQueriesPuller<'a> {
 
                 let mut columns_data = Vec::with_capacity(data_block.num_columns());
                 for column in data_block.columns() {
-                    let series = column.to_array()?;
-                    match series.to_values()? {
-                        values if values.len() == 1 => columns_data.push(values[0].clone()),
+                    match column.len() {
+                        1 => columns_data.push(column.get(0)),
                         _ => {
                             return Err(ErrorCode::ScalarSubqueryBadRows(
                                 "Scalar subquery result set must be one row.",

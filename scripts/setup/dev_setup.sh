@@ -228,7 +228,7 @@ if [[ "$INSTALL_BUILD_TOOLS" == "false" ]] &&
 	INSTALL_BUILD_TOOLS="true"
 fi
 
-if [ ! -f rust-toolchain ]; then
+if [ ! -f rust-toolchain.toml ]; then
 	echo "Unknown location. Please run this from the databend repository. Abort."
 	exit 1
 fi
@@ -295,7 +295,7 @@ if [[ "$INSTALL_BUILD_TOOLS" == "true" ]]; then
 	install_pkg llvm "$PACKAGE_MANAGER"
 	install_pkg python3 "$PACKAGE_MANAGER"
 	install_pkg_config "$PACKAGE_MANAGER"
-	python3 -m pip install boto3 "moto[all]" yapf shfmt-py
+	python3 -m pip install boto3 "moto[all]" yapf shfmt-py mysql-connector-python toml
 
 	case "$PACKAGE_MANAGER" in
 	apt-get)
@@ -319,8 +319,31 @@ if [[ "$INSTALL_BUILD_TOOLS" == "true" ]]; then
 		;;
 	esac
 
+	case "$PACKAGE_MANAGER" in
+	apt-get)
+		install_pkg protobuf-compiler "$PACKAGE_MANAGER"
+		;;
+	pacman)
+		install_pkg protoc "$PACKAGE_MANAGER"
+		;;
+	yum)
+		install_pkg protobuf "$PACKAGE_MANAGER"
+		;;
+	dnf)
+		install_pkg protobuf-compiler "$PACKAGE_MANAGER"
+		;;
+	brew)
+		install_pkg protobuf "$PACKAGE_MANAGER"
+		;;
+	*)
+		echo "Unable to install protobuf with package manager: $PACKAGE_MANAGER"
+		exit 1
+		;;
+	esac
+
 	install_rustup "$BATCH_MODE"
-	install_toolchain "$(cat ./rust-toolchain)"
+
+	install_toolchain "$(awk -F'[ ="]+' '$1 == "channel" { print $2 }' rust-toolchain.toml)"
 
 	install_pkg lcov "$PACKAGE_MANAGER"
 fi

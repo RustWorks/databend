@@ -15,6 +15,7 @@
 use comfy_table::Cell;
 use comfy_table::Table;
 use common_exception::Result;
+use regex::bytes::Regex;
 
 use crate::DataBlock;
 
@@ -73,7 +74,7 @@ pub fn assert_blocks_sorted_eq_with_name(test_name: &str, expect: Vec<&str>, blo
     );
 }
 
-///! Convert a series of record batches into a table
+///! Convert a column of record batches into a table
 fn create_table(results: &[DataBlock]) -> Result<Table> {
     let mut table = Table::new();
     table.load_preset("||--+-++|    ++++++");
@@ -94,8 +95,8 @@ fn create_table(results: &[DataBlock]) -> Result<Table> {
         for row in 0..batch.num_rows() {
             let mut cells = Vec::new();
             for col in 0..batch.num_columns() {
-                let series = batch.column(col).to_array()?;
-                let str = format!("{}", series.try_get(row)?);
+                let column = batch.column(col);
+                let str = format!("{}", column.get_checked(row)?);
                 cells.push(Cell::new(&str));
             }
             table.add_row(cells);
@@ -103,4 +104,48 @@ fn create_table(results: &[DataBlock]) -> Result<Table> {
     }
 
     Ok(table)
+}
+
+pub fn assert_blocks_sorted_eq_with_regex(patterns: Vec<&str>, blocks: &[DataBlock]) {
+    let mut re_patterns: Vec<String> = patterns
+        .iter()
+        .map(|&s| {
+            let mut re_pattern: String = "^".into();
+            re_pattern += s;
+            re_pattern += "$";
+            re_pattern
+        })
+        .collect();
+
+    // sort except for header + footer
+    let num_lines = re_patterns.len();
+    if num_lines > 3 {
+        re_patterns.as_mut_slice()[2..num_lines - 1].sort_unstable()
+    }
+
+    let formatted = pretty_format_blocks(blocks).unwrap();
+    let mut actual_lines: Vec<&str> = formatted.trim().lines().collect();
+
+    assert_eq!(
+        num_lines,
+        actual_lines.len(),
+        "expected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
+        re_patterns,
+        actual_lines,
+    );
+
+    // sort except for header + footer
+    if num_lines > 3 {
+        actual_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
+    }
+
+    for i in 0..num_lines {
+        let re = Regex::new(&re_patterns[i]).unwrap();
+        if !re.is_match(actual_lines[i].as_bytes()) {
+            panic!(
+                "expected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
+                re_patterns, actual_lines
+            )
+        }
+    }
 }

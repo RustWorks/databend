@@ -14,66 +14,51 @@
 
 use std::fmt;
 
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnWithField;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
+use common_datavalues::ColumnRef;
+use common_datavalues::ColumnsWithField;
+use common_datavalues::DataTypePtr;
 use common_exception::Result;
 use dyn_clone::DynClone;
 
-#[derive(Clone)]
-pub struct Monotonicity {
-    // Is the function monotonic (non-decreasing or non-increasing).
-    pub is_monotonic: bool,
-
-    // Field for indicating monotonic increase or decrease
-    //   1. is_positive=true means non-decreasing
-    //   2. is_positive=false means non-increasing
-    // when is_monotonic is false, just ignore the is_positive information.
-    pub is_positive: bool,
-
-    // Is the monotonicity from constant value
-    pub is_constant: bool,
-
-    pub left: Option<DataColumnWithField>,
-
-    pub right: Option<DataColumnWithField>,
-}
-
-impl Monotonicity {
-    pub fn default() -> Self {
-        Monotonicity {
-            is_monotonic: false,
-            is_positive: true,
-            is_constant: false,
-            left: None,
-            right: None,
-        }
-    }
-}
+use super::Monotonicity;
 
 pub trait Function: fmt::Display + Sync + Send + DynClone {
+    /// Returns the name of the function, should be unique.
     fn name(&self) -> &str;
 
-    fn num_arguments(&self) -> usize {
-        0
-    }
-
-    // (1, 2) means we only accept [1, 2] arguments
-    // None means it's not variadic function
-    fn variadic_arguments(&self) -> Option<(usize, usize)> {
-        None
-    }
-
     /// Calculate the monotonicity from arguments' monotonicity information.
-    /// The input should be argument's monotonicity. For binary function it should be an array of left expression's monotonicity and right expression's monotonicity.
+    /// The input should be argument's monotonicity. For binary function it should be an
+    /// array of left expression's monotonicity and right expression's monotonicity.
     /// For unary function, the input should be an array of the only argument's monotonicity.
+    /// The returned monotonicity should have 'left' and 'right' fields None -- the boundary
+    /// calculation relies on the function.eval method.
     fn get_monotonicity(&self, _args: &[Monotonicity]) -> Result<Monotonicity> {
         Ok(Monotonicity::default())
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType>;
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool>;
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn>;
+    /// The method returns the return_type of this function.
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr>;
+
+    /// Evaluate the function, e.g. run/execute the function.
+    fn eval(&self, _columns: &ColumnsWithField, _input_rows: usize) -> Result<ColumnRef>;
+
+    /// Whether the function passes through null input.
+    /// Return true if the function just return null with any given null input.
+    /// Return false if the function may return non-null with null input.
+    ///
+    /// For example, arithmetic plus('+') will output null for any null input, like '12 + null = null'.
+    /// It has no idea of how to handle null, but just pass through.
+    ///
+    /// While ISNULL function  treats null input as a valid one. For example ISNULL(NULL, 'test') will return 'test'.
+    fn passthrough_null(&self) -> bool {
+        true
+    }
+
+    /// If all args are constant column, then we just return the constant result
+    /// TODO, we should cache the constant result inside the context for better performance
+    fn passthrough_constant(&self) -> bool {
+        true
+    }
 }
+
+dyn_clone::clone_trait_object!(Function);

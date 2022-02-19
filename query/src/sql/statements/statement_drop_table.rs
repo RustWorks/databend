@@ -33,18 +33,20 @@ pub struct DfDropTable {
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfDropTable {
-    #[tracing::instrument(level = "info", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn analyze(&self, ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
         let if_exists = self.if_exists;
+        let tenant = ctx.get_tenant();
         let (db, table) = self.resolve_table(ctx)?;
 
-        Ok(AnalyzedResult::SimpleQuery(PlanNode::DropTable(
+        Ok(AnalyzedResult::SimpleQuery(Box::new(PlanNode::DropTable(
             DropTablePlan {
                 if_exists,
+                tenant,
                 db,
                 table,
             },
-        )))
+        ))))
     }
 }
 

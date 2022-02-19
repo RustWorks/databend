@@ -20,22 +20,34 @@ use nom::character::complete::multispace1;
 use nom::IResult;
 
 use super::statements::DfCopy;
+use super::statements::DfDescribeStage;
+use crate::sql::statements::DfAlterUDF;
 use crate::sql::statements::DfAlterUser;
 use crate::sql::statements::DfCreateDatabase;
+use crate::sql::statements::DfCreateStage;
 use crate::sql::statements::DfCreateTable;
+use crate::sql::statements::DfCreateUDF;
 use crate::sql::statements::DfCreateUser;
 use crate::sql::statements::DfDescribeTable;
 use crate::sql::statements::DfDropDatabase;
+use crate::sql::statements::DfDropStage;
 use crate::sql::statements::DfDropTable;
+use crate::sql::statements::DfDropUDF;
 use crate::sql::statements::DfDropUser;
 use crate::sql::statements::DfExplain;
 use crate::sql::statements::DfGrantStatement;
 use crate::sql::statements::DfInsertStatement;
 use crate::sql::statements::DfKillStatement;
+use crate::sql::statements::DfOptimizeTable;
 use crate::sql::statements::DfQueryStatement;
+use crate::sql::statements::DfRevokeStatement;
 use crate::sql::statements::DfSetVariable;
+use crate::sql::statements::DfShowCreateDatabase;
 use crate::sql::statements::DfShowCreateTable;
 use crate::sql::statements::DfShowDatabases;
+use crate::sql::statements::DfShowEngines;
+use crate::sql::statements::DfShowFunctions;
+use crate::sql::statements::DfShowGrants;
 use crate::sql::statements::DfShowMetrics;
 use crate::sql::statements::DfShowProcessList;
 use crate::sql::statements::DfShowSettings;
@@ -43,27 +55,32 @@ use crate::sql::statements::DfShowTables;
 use crate::sql::statements::DfShowUsers;
 use crate::sql::statements::DfTruncateTable;
 use crate::sql::statements::DfUseDatabase;
+use crate::sql::statements::DfUseTenant;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DfStatement {
     // ANSI SQL AST node
-    Query(DfQueryStatement),
+    Query(Box<DfQueryStatement>),
     Explain(DfExplain),
 
     // Databases.
     ShowDatabases(DfShowDatabases),
+    ShowCreateDatabase(DfShowCreateDatabase),
     CreateDatabase(DfCreateDatabase),
     DropDatabase(DfDropDatabase),
     UseDatabase(DfUseDatabase),
+    UseTenant(DfUseTenant),
 
     // Tables.
     ShowTables(DfShowTables),
     ShowCreateTable(DfShowCreateTable),
     CreateTable(DfCreateTable),
     DescribeTable(DfDescribeTable),
+    DescribeStage(DfDescribeStage),
     DropTable(DfDropTable),
     TruncateTable(DfTruncateTable),
+    OptimizeTable(DfOptimizeTable),
 
     // Settings.
     ShowSettings(DfShowSettings),
@@ -73,6 +90,9 @@ pub enum DfStatement {
 
     // Metrics
     ShowMetrics(DfShowMetrics),
+
+    // Functions
+    ShowFunctions(DfShowFunctions),
 
     // Kill
     KillStatement(DfKillStatement),
@@ -94,6 +114,20 @@ pub enum DfStatement {
 
     // Grant
     GrantPrivilege(DfGrantStatement),
+    RevokePrivilege(DfRevokeStatement),
+    ShowGrants(DfShowGrants),
+
+    // Stage
+    CreateStage(DfCreateStage),
+    DropStage(DfDropStage),
+
+    // UDF
+    CreateUDF(DfCreateUDF),
+    DropUDF(DfDropUDF),
+    AlterUDF(DfAlterUDF),
+
+    // Engine
+    ShowEngines(DfShowEngines),
 }
 
 /// Comment hints from SQL.

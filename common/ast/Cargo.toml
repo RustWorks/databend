@@ -1,0 +1,36 @@
+[package]
+name = "common-ast"
+version = "0.1.0"
+authors = ["Databend Authors <opensource@datafuselabs.com>"]
+license = "Apache-2.0"
+publish = false
+edition = "2021"
+
+[lib]
+doctest = false
+test = false
+
+[dependencies] # In alphabetical order
+# Workspace dependencies
+common-exception = { path = "../exception" }
+common-functions = { path = "../functions" }
+
+# Github dependencies
+# TODO (andylokandy): Use the version from crates.io once
+# https://github.com/brendanzab/codespan/pull/331 is released.
+codespan-reporting = { git = "https://github.com/brendanzab/codespan", rev = "c84116f5" }
+sqlparser = { git = "https://github.com/datafuse-extras/sqlparser-rs", rev = "c33837e" }
+
+# Crates.io dependencies
+async-trait = "0.1.52"
+logos = "0.12.0"
+nom = "7.1.0"
+nom-rule = "0.2.0"
+once_cell = "1.9.0"
+thiserror = "1.0.30"
+pratt = "0.3.0"
+
+[dev-dependencies]
+goldenfile = "1.1.0"
+pretty_assertions = "1.1.0"
+common-base = { path = "../base" }

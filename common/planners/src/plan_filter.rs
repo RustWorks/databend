@@ -41,7 +41,7 @@ impl FilterPlan {
 
     pub fn is_literal_false(&self) -> bool {
         if let Expression::Literal { value, .. } = &self.predicate {
-            return *value == DataValue::Boolean(Some(false));
+            return *value == DataValue::Boolean(false);
         }
         false
     }

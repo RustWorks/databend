@@ -16,6 +16,8 @@ use std::convert::TryInto;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use common_arrow::arrow::io::flight::serialize_schema;
+use common_arrow::arrow::io::ipc::write::default_ipc_fields;
 use common_arrow::arrow_format::flight::data::Action;
 use common_arrow::arrow_format::flight::data::ActionType;
 use common_arrow::arrow_format::flight::data::Criteria;
@@ -30,6 +32,7 @@ use common_arrow::arrow_format::flight::data::Result as FlightResult;
 use common_arrow::arrow_format::flight::data::SchemaResult;
 use common_arrow::arrow_format::flight::data::Ticket;
 use common_arrow::arrow_format::flight::service::flight_service_server::FlightService;
+use common_tracing::tracing;
 use tokio_stream::Stream;
 use tonic::Request;
 use tonic::Response as RawResponse;
@@ -98,15 +101,22 @@ impl FlightService for DatabendQueryFlightService {
 
     type DoGetStream = FlightStream<FlightData>;
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn do_get(&self, request: Request<Ticket>) -> Response<Self::DoGetStream> {
+        common_tracing::extract_remote_span_as_parent(&request);
         let ticket: FlightTicket = request.into_inner().try_into()?;
 
         match ticket {
             FlightTicket::StreamTicket(steam_ticket) => {
-                let receiver = self.dispatcher.get_stream(&steam_ticket)?;
+                let (receiver, data_schema) = self.dispatcher.get_stream(&steam_ticket)?;
+                let arrow_schema = data_schema.to_arrow();
+                let ipc_fields = default_ipc_fields(arrow_schema.fields());
+
+                serialize_schema(&arrow_schema, &ipc_fields);
 
                 Ok(RawResponse::new(
-                    Box::pin(FlightDataStream::create(receiver)) as FlightStream<FlightData>,
+                    Box::pin(FlightDataStream::create(receiver, ipc_fields))
+                        as FlightStream<FlightData>,
                 ))
             }
         }
@@ -130,7 +140,10 @@ impl FlightService for DatabendQueryFlightService {
 
     type DoActionStream = FlightStream<FlightResult>;
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn do_action(&self, request: Request<Action>) -> Response<Self::DoActionStream> {
+        common_tracing::extract_remote_span_as_parent(&request);
+
         let action = request.into_inner();
         let flight_action: FlightAction = action.try_into()?;
 
@@ -138,7 +151,7 @@ impl FlightService for DatabendQueryFlightService {
             FlightAction::CancelAction(action) => {
                 // We only destroy when session is exist
                 let session_id = action.query_id.clone();
-                if let Some(session) = self.sessions.get_session(&session_id) {
+                if let Some(session) = self.sessions.get_session_by_id(&session_id) {
                     // TODO: remove streams
                     session.force_kill_session();
                 }
@@ -175,7 +188,9 @@ impl FlightService for DatabendQueryFlightService {
 
     type ListActionsStream = FlightStream<ActionType>;
 
-    async fn list_actions(&self, _: Request<Empty>) -> Response<Self::ListActionsStream> {
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn list_actions(&self, request: Request<Empty>) -> Response<Self::ListActionsStream> {
+        common_tracing::extract_remote_span_as_parent(&request);
         Result::Ok(RawResponse::new(
             Box::pin(tokio_stream::iter(vec![
                 Ok(ActionType {

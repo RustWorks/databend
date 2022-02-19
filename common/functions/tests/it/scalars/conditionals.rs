@@ -11,79 +11,99 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use std::sync::Arc;
 
 use common_datavalues::prelude::*;
-use common_datavalues::DataType;
 use common_exception::Result;
-use common_functions::scalars::*;
-use pretty_assertions::assert_eq;
+use common_functions::scalars::IfFunction;
+
+use crate::scalars::scalar_function2_test::test_scalar_functions;
+use crate::scalars::scalar_function2_test::ScalarFunctionTest;
 
 #[test]
 fn test_if_function() -> Result<()> {
-    #[allow(dead_code)]
-    struct Test {
-        name: &'static str,
-        display: &'static str,
-        nullable: bool,
-        args: Vec<DataType>,
-        columns: Vec<DataColumn>,
-        expect: Series,
-        error: &'static str,
-        func: Box<dyn Function>,
-    }
+    let tests = vec![
+        ScalarFunctionTest {
+            name: "if-primitive",
+            columns: vec![
+                Series::from_data([true, false, false, true]),
+                Series::from_data([1u8, 2, 3, 4]),
+                Series::from_data([2u8, 3u8, 2u8, 2u8]),
+            ],
+            expect: Series::from_data(vec![1u8, 3, 2, 4]), // non-nullable
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-string",
+            columns: vec![
+                Series::from_data([true, false, false, true]),
+                Series::from_data(["1_aa", "1_bb", "1_cc", "1_dd"]),
+                Series::from_data(["2_aa", "2_bb", "2_cc", "2_dd"]),
+            ],
+            expect: Series::from_data(vec!["1_aa", "2_bb", "2_cc", "1_dd"]), // non-nullable
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-bool",
+            columns: vec![
+                Series::from_data([true, false, false, true]),
+                Series::from_data([true, true, true, true]),
+                Series::from_data([false, false, false, false]),
+            ],
+            expect: Series::from_data(vec![true, false, false, true]), // non-nullable
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-null-in-predicate",
+            columns: vec![
+                Series::from_data([Some(true), None, Some(false), Some(true)]),
+                Series::from_data([Some(1u8), Some(2u8), Some(3u8), None]),
+                Series::from_data([2i32, 3, 2, 2]),
+            ],
+            expect: Series::from_data(vec![Some(1i32), Some(3i32), Some(2i32), None]), // nullable becase predicate is nullable
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-nullable-and-nonnullable",
+            columns: vec![
+                Series::from_data([Some(1u8), None, None, Some(2)]),
+                Series::from_data([Some(2u8), Some(2), Some(2), Some(2)]),
+                Series::from_data([Some(3i32), Some(3i32), None, None]),
+            ],
+            expect: Series::from_data(vec![Some(2i32), Some(3i32), None, Some(2i32)]), // nullable becase predicate and rhs are nullable
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-all-nullable",
+            columns: vec![
+                Series::from_data([Some(true), None, Some(false), Some(false)]),
+                Series::from_data([Some(1u8), Some(2), Some(3), Some(4)]),
+                Series::from_data([Some(2i32), Some(3), None, Some(2)]),
+            ],
+            expect: Series::from_data(vec![Some(1i32), Some(3i32), None, Some(2i32)]), // nullable becase all column are nullable
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-null",
+            columns: vec![
+                Series::from_data([true, false, false, true]),
+                Series::from_data([Some(1u8), Some(2), Some(3), Some(4)]),
+                Arc::new(NullColumn::new(4)),
+            ],
+            expect: Series::from_data(vec![Some(1u8), None, None, Some(4)]),
+            error: "",
+        },
+        ScalarFunctionTest {
+            name: "if-null",
+            columns: vec![
+                Arc::new(NullColumn::new(4)),
+                Series::from_data([0u8, 0, 0, 0]),
+                Series::from_data([1u8, 2, 3, 4]),
+            ],
+            expect: Series::from_data(vec![1u8, 2, 3, 4]),
+            error: "",
+        },
+    ];
 
-    let schema = DataSchemaRefExt::create(vec![
-        DataField::new("a", DataType::Int32, false),
-        DataField::new("b", DataType::Int64, false),
-    ]);
-
-    let tests = vec![Test {
-        name: "if-passed",
-        display: "IF",
-        nullable: false,
-        func: IfFunction::try_create_func("")?,
-        args: vec![
-            DataType::Boolean,
-            schema.field_with_name("a")?.data_type().clone(),
-            DataType::Float64,
-        ],
-        columns: vec![
-            Series::new(vec![true, false, false, true]).into(),
-            Series::new(vec![1i32, 2, 3, 4]).into(),
-            DataColumn::Constant(DataValue::Float64(Some(2.5)), 4),
-        ],
-        expect: Series::new(vec![1f64, 2.5, 2.5, 4f64]),
-        error: "",
-    }];
-
-    for t in tests {
-        let func = t.func;
-
-        let columns: Vec<DataColumnWithField> = t
-            .columns
-            .iter()
-            .map(|c| DataColumnWithField::new(c.clone(), DataField::new("a", c.data_type(), false)))
-            .collect();
-
-        // Display check.
-        let expect_display = t.display.to_string();
-        let actual_display = format!("{}", func);
-        assert_eq!(expect_display, actual_display);
-
-        // Nullable check.
-        let expect_null = t.nullable;
-        let actual_null = func.nullable(&schema)?;
-        assert_eq!(expect_null, actual_null);
-
-        let v = &(func.eval(&columns, t.columns[0].len())?);
-        // Type check.
-        let expect_type = func.return_type(&t.args)?;
-        let actual_type = v.data_type();
-        assert_eq!(expect_type, actual_type);
-
-        let cmp = v.to_array()?.eq(&t.expect)?;
-        assert!(cmp.all_true());
-    }
-
-    Ok(())
+    test_scalar_functions(IfFunction::try_create("if")?, &tests)
 }

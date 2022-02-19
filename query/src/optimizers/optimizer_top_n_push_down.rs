@@ -15,15 +15,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_datavalues::prelude::DataColumnWithField;
+use common_datavalues::prelude::ColumnWithField;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::*;
 use common_tracing::tracing;
 
-use super::MonotonicityCheckVisitor;
-use super::RequireColumnsVisitor;
 use crate::optimizers::Optimizer;
 use crate::sessions::QueryContext;
 
@@ -36,7 +34,7 @@ struct TopNPushDownImpl {
     before_group_by_schema: Option<DataSchemaRef>,
     limit: Option<usize>,
     order_by: Vec<Expression>,
-    variables_range: HashMap<String, (Option<DataColumnWithField>, Option<DataColumnWithField>)>,
+    variables_range: HashMap<String, (Option<ColumnWithField>, Option<ColumnWithField>)>,
 }
 
 impl PlanRewriter for TopNPushDownImpl {
@@ -113,13 +111,13 @@ impl PlanRewriter for TopNPushDownImpl {
                         projection: extras.projection.clone(),
                         filters: extras.filters.clone(),
                         limit: Some(new_limit),
-                        order_by: self.get_sort_columns()?,
+                        order_by: self.get_sort_columns(plan.schema())?,
                     })
                 }
                 None => {
                     let mut extras = Extras::default();
                     extras.limit = Some(n);
-                    extras.order_by = self.get_sort_columns()?;
+                    extras.order_by = self.get_sort_columns(plan.schema())?;
                     Some(extras)
                 }
             };
@@ -156,7 +154,7 @@ impl TopNPushDownImpl {
     // For every order by columns, try the best to extract the native columns.
     // For example 'order by age+3, number+5', will return expression of two columns,
     // 'age' and 'number', since f(age)=age+3 and f(number)=number+5 are both monotonic functions.
-    fn get_sort_columns(&self) -> Result<Vec<Expression>> {
+    fn get_sort_columns(&self, schema: DataSchemaRef) -> Result<Vec<Expression>> {
         self.order_by
             .iter()
             .map(|expr| {
@@ -168,12 +166,19 @@ impl TopNPushDownImpl {
 
                 let column_name = columns.iter().next().unwrap();
 
-                let (left, right) = match self.variables_range.get(column_name) {
-                    None => (None, None),
-                    Some((l, r)) => (l.clone(), r.clone()),
-                };
+                let (left, right) = self
+                    .variables_range
+                    .get(column_name)
+                    .cloned()
+                    .unwrap_or((None, None));
 
-                match MonotonicityCheckVisitor::extract_sort_column(expr, left, right) {
+                match ExpressionMonotonicityVisitor::extract_sort_column(
+                    schema.clone(),
+                    expr,
+                    left,
+                    right,
+                    column_name,
+                ) {
                     Ok(new_expr) => Ok(new_expr),
                     Err(error) => {
                         tracing::error!(

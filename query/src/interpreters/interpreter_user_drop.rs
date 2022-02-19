@@ -42,15 +42,21 @@ impl Interpreter for DropUserInterpreter {
         "DropUserInterpreter"
     }
 
-    #[tracing::instrument(level = "info", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
     async fn execute(
         &self,
         _input_stream: Option<SendableDataBlockStream>,
     ) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
-        let user_mgr = self.ctx.get_sessions_manager().get_user_manager();
+        let tenant = self.ctx.get_tenant();
+        let user_mgr = self.ctx.get_user_manager();
         user_mgr
-            .drop_user(plan.name.as_str(), plan.hostname.as_str(), plan.if_exists)
+            .drop_user(
+                &tenant,
+                plan.name.as_str(),
+                plan.hostname.as_str(),
+                plan.if_exists,
+            )
             .await?;
 
         Ok(Box::pin(DataBlockStream::create(

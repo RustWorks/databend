@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_exception::ErrorCode;
+use common_exception::SerializedError;
 use tonic::Code;
 use tonic::Status;
 
@@ -30,11 +32,11 @@ fn test_format_with_error_codes() {
     );
     assert_eq!(
         format!("{}", ErrorCode::UnknownException("test message 1")),
-        "Code: 1000, displayText = test message 1."
+        "Code: 1067, displayText = test message 1."
     );
     assert_eq!(
         format!("{}", ErrorCode::UnknownException("test message 2")),
-        "Code: 1000, displayText = test message 2."
+        "Code: 1067, displayText = test message 2."
     );
 }
 
@@ -59,7 +61,7 @@ fn test_derive_from_std_error() {
         fmt_rst.map_err_to_code(ErrorCode::UnknownException, || 123);
 
     assert_eq!(
-        "Code: 1000, displayText = 123, cause: an error occurred when formatting an argument.",
+        "Code: 1067, displayText = 123, cause: an error occurred when formatting an argument.",
         format!("{}", rst1.as_ref().unwrap_err())
     );
 
@@ -67,7 +69,7 @@ fn test_derive_from_std_error() {
         rst1.map_err_to_code(ErrorCode::Ok, || "wrapper");
 
     assert_eq!(
-        "Code: 0, displayText = wrapper, cause: Code: 1000, displayText = 123, cause: an error occurred when formatting an argument..",
+        "Code: 0, displayText = wrapper, cause: Code: 1067, displayText = 123, cause: an error occurred when formatting an argument..",
         format!("{}", rst2.as_ref().unwrap_err())
     );
 }
@@ -83,9 +85,21 @@ fn test_derive_from_display() {
         rst.map_err_to_code(ErrorCode::UnknownException, || 123);
 
     assert_eq!(
-        "Code: 1000, displayText = 123, cause: 3.",
+        "Code: 1067, displayText = 123, cause: 3.",
         format!("{}", rst1.as_ref().unwrap_err())
     );
+}
+
+#[test]
+fn test_from_and_to_serialized_error() {
+    let ec = ErrorCode::UnknownDatabase("foo");
+    let se: SerializedError = ec.clone().into();
+
+    let ec2: ErrorCode = se.into();
+    assert_eq!(ec.code(), ec2.code());
+    assert_eq!(ec.message(), ec2.message());
+    assert_eq!(format!("{}", ec), format!("{}", ec2));
+    assert_eq!(ec.backtrace_str(), ec2.backtrace_str());
 }
 
 #[test]
@@ -97,25 +111,16 @@ fn test_from_and_to_status() -> anyhow::Result<()> {
 
     // Only compare the code and message. Discard backtrace.
     assert_eq!(
-        r#"{"code":7,"message":"foo","#.as_bytes(),
-        &status.details()[..26]
+        r#"{"code":1007,"message":"foo","#.as_bytes(),
+        &status.details()[..29]
     );
-
-    {
-        // test from &Status
-
-        let e2: ErrorCode = (&status).into();
-
-        assert_eq!(7, e2.code());
-        assert_eq!("foo", e2.message());
-    }
 
     {
         // test from Status
 
         let e2: ErrorCode = status.into();
 
-        assert_eq!(7, e2.code());
+        assert_eq!(1007, e2.code());
         assert_eq!("foo", e2.message());
     }
 
@@ -124,16 +129,9 @@ fn test_from_and_to_status() -> anyhow::Result<()> {
     assert_eq!(r#""#.as_bytes(), status1.details());
 
     {
-        // test from &Status
-        let e1: ErrorCode = (&status1).into();
-        assert_eq!(1000, e1.code());
-        assert_eq!("foo", e1.message());
-    }
-
-    {
         // test from Status
         let e1: ErrorCode = status1.into();
-        assert_eq!(1000, e1.code());
+        assert_eq!(1067, e1.code());
         assert_eq!("foo", e1.message());
     }
 

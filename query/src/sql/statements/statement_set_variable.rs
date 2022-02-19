@@ -37,7 +37,7 @@ pub struct DfSetVariable {
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfSetVariable {
-    #[tracing::instrument(level = "info", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
     async fn analyze(&self, _ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
         if self.hivevar {
             return Err(ErrorCode::SyntaxException(
@@ -47,8 +47,8 @@ impl AnalyzableStatement for DfSetVariable {
 
         // TODO: session variable and local variable
         let vars = self.mapping_set_vars();
-        Ok(AnalyzedResult::SimpleQuery(PlanNode::SetVariable(
-            SettingPlan { vars },
+        Ok(AnalyzedResult::SimpleQuery(Box::new(
+            PlanNode::SetVariable(SettingPlan { vars }),
         )))
     }
 }

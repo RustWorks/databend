@@ -15,14 +15,16 @@
 use std::fmt;
 
 use common_datavalues::prelude::*;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
-use common_exception::ErrorCode;
+use common_datavalues::with_match_primitive_type_id;
 use common_exception::Result;
+use num::cast::AsPrimitive;
 
+use crate::scalars::function_common::assert_numeric;
 use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
+use crate::scalars::EvalContext;
 use crate::scalars::Function;
+use crate::scalars::ScalarUnaryExpression;
 
 #[derive(Clone)]
 pub struct SqrtFunction {
@@ -38,8 +40,13 @@ impl SqrtFunction {
 
     pub fn desc() -> FunctionDescription {
         FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic())
+            .features(FunctionFeatures::default().deterministic().num_arguments(1))
     }
+}
+
+fn sqrt<S>(value: S, _ctx: &mut EvalContext) -> f64
+where S: AsPrimitive<f64> {
+    value.as_().sqrt()
 }
 
 impl Function for SqrtFunction {
@@ -47,37 +54,20 @@ impl Function for SqrtFunction {
         &*self.display_name
     }
 
-    fn num_arguments(&self) -> usize {
-        1
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        assert_numeric(args[0])?;
+        Ok(Float64Type::arc())
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if args[0].is_numeric() || args[0] == DataType::String || args[0] == DataType::Null {
-            Ok(DataType::Float64)
-        } else {
-            Err(ErrorCode::IllegalDataType(format!(
-                "Expected numeric types, but got {}",
-                args[0]
-            )))
-        }
-    }
-
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(true)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        let opt_iter = columns[0]
-            .column()
-            .to_minimal_array()?
-            .cast_with_type(&DataType::Float64)?;
-        let opt_iter = opt_iter
-            .f64()?
-            .into_iter()
-            .map(|v| v.and_then(|&v| if v >= 0_f64 { Some(v.sqrt()) } else { None }));
-        let result = DFFloat64Array::new_from_opt_iter(opt_iter);
-        let column: DataColumn = result.into();
-        Ok(column.resize_constant(columns[0].column().len()))
+    fn eval(&self, columns: &ColumnsWithField, _input_rows: usize) -> Result<ColumnRef> {
+        let mut ctx = EvalContext::default();
+        with_match_primitive_type_id!(columns[0].data_type().data_type_id(), |$S| {
+             let unary = ScalarUnaryExpression::<$S, f64, _>::new(sqrt::<$S>);
+             let col = unary.eval(columns[0].column(), &mut ctx)?;
+             Ok(col.arc())
+        },{
+            unreachable!()
+        })
     }
 }
 

@@ -14,15 +14,12 @@
 
 use std::fmt;
 
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
+use common_datavalues::prelude::*;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct IsNotNullFunction {
@@ -41,7 +38,8 @@ impl IsNotNullFunction {
             FunctionFeatures::default()
                 .deterministic()
                 .negative_function("isnull")
-                .bool_function(),
+                .bool_function()
+                .num_arguments(1),
         )
     }
 }
@@ -51,20 +49,31 @@ impl Function for IsNotNullFunction {
         "IsNotNullFunction"
     }
 
-    fn num_arguments(&self) -> usize {
-        1
+    fn return_type(
+        &self,
+        _args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        Ok(bool::to_data_type())
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
+    fn eval(
+        &self,
+        columns: &common_datavalues::ColumnsWithField,
+        input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
+        let (all_null, validity) = columns[0].column().validity();
+        if all_null {
+            return Ok(ConstColumn::new(Series::from_data(vec![false]), input_rows).arc());
+        }
+
+        match validity {
+            Some(validity) => Ok(BooleanColumn::from_arrow_data(validity.clone()).arc()),
+            None => Ok(ConstColumn::new(Series::from_data(vec![true]), input_rows).arc()),
+        }
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        columns[0].column().is_not_null()
+    fn passthrough_null(&self) -> bool {
+        false
     }
 }
 

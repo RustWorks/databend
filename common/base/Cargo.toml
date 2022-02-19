@@ -10,6 +10,9 @@ edition = "2021"
 doctest = false
 test = false
 
+[features]
+tracing = ["tokio/tracing"]
+
 [dependencies] # In alphabetical order
 # Workspace dependencies
 common-tracing = { path = "../tracing" }
@@ -18,16 +21,11 @@ common-exception = { path = "../exception" }
 # Github dependencies
 
 # Crates.io dependencies
-async-trait = "0.1"
-ctrlc = { version = "3.1.9", features = ["termination"] }
-futures = "0.3"
-pprof = { version = "0.5", features = ["flamegraph", "protobuf"] }
-tokio = { version = "1.14.0", features = ["macros", "rt", "rt-multi-thread", "sync", "fs", "signal"] }
-uuid = { version = "0.8", features = ["serde", "v4"] }
-serde = { version = "1.0", features = ["derive"] }
-poem = { version = "1.0.30", features = ["rustls"] }
-
-
-[dev-dependencies]
-pretty_assertions = "1.0"
-
+async-trait = "0.1.52"
+ctrlc = { version = "3.2.1", features = ["termination"] }
+futures = "0.3.21"
+pprof = { version = "0.6.2", features = ["flamegraph", "protobuf"] }
+tokio = { version = "1.16.1", features = ["full"] }
+uuid = { version = "0.8.2", features = ["serde", "v4"] }
+serde = { version = "1.0.136", features = ["derive"] }
+poem = { version = "1.2.53", features = ["rustls"] }

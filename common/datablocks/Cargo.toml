@@ -12,17 +12,18 @@ test = false
 
 [dependencies] # In alphabetical order
 # Workspace dependencies
-common-arrow = {path = "../arrow"}
-common-datavalues = {path = "../datavalues"}
-common-exception = {path = "../exception"}
-common-io = {path = "../io"}
-
+common-arrow = { path = "../arrow" }
+common-datavalues = { path = "../datavalues" }
+common-exception = { path = "../exception" }
+common-io = { path = "../io" }
+common-infallible = { path = "../infallible" }
 
 # Github dependencies
 
 # Crates.io dependencies
 ahash = "0.7.6"
-comfy-table = "4.1.1"
+comfy-table = "5.0.0"
+regex = "1.5.4"
 
 [dev-dependencies]
-pretty_assertions = "1.0"
+pretty_assertions = "1.1.0"

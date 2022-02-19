@@ -16,12 +16,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_datablocks::DataBlock;
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnWithField;
-use common_datavalues::DataField;
-use common_datavalues::DataSchemaRef;
+use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_planners::ActionFunction;
 use common_planners::Expression;
 use common_planners::ExpressionAction;
 use common_planners::ExpressionChain;
@@ -39,8 +37,6 @@ pub struct ExpressionExecutor {
     // whether to perform alias action in executor
     alias_project: bool,
 }
-
-pub type ExpressionExecutorRef = Arc<ExpressionExecutor>;
 
 impl ExpressionExecutor {
     pub fn try_create(
@@ -72,9 +68,9 @@ impl ExpressionExecutor {
             self.chain.actions
         );
 
-        let mut column_map: HashMap<&str, DataColumnWithField> = HashMap::new();
+        let mut column_map: HashMap<&str, ColumnWithField> = HashMap::new();
 
-        let mut alias_map: HashMap<&str, &DataColumnWithField> = HashMap::new();
+        let mut alias_map: HashMap<&str, &ColumnWithField> = HashMap::new();
 
         // supported a + 1 as b, a + 1 as c
         // supported a + 1 as a, a as b
@@ -83,7 +79,7 @@ impl ExpressionExecutor {
 
         for f in block.schema().fields().iter() {
             let column =
-                DataColumnWithField::new(block.try_column_by_name(f.name())?.clone(), f.clone());
+                ColumnWithField::new(block.try_column_by_name(f.name())?.clone(), f.clone());
             column_map.insert(f.name(), column);
         }
 
@@ -104,45 +100,24 @@ impl ExpressionExecutor {
             match action {
                 ExpressionAction::Input(input) => {
                     let column = block.try_column_by_name(&input.name)?.clone();
-                    let column = DataColumnWithField::new(
+                    let column = ColumnWithField::new(
                         column,
                         block.schema().field_with_name(&input.name)?.clone(),
                     );
                     column_map.insert(input.name.as_str(), column);
                 }
                 ExpressionAction::Function(f) => {
-                    // check if it's cached
-                    let mut arg_columns = Vec::with_capacity(f.arg_names.len());
-
-                    for arg in f.arg_names.iter() {
-                        let column = column_map.get(arg.as_str()).cloned().ok_or_else(|| {
-                            ErrorCode::LogicalError(
-                                "Arguments must be prepared before function transform",
-                            )
-                        })?;
-                        arg_columns.push(column);
-                    }
-
-                    let func = f.to_function()?;
-                    let column = func.eval(&arg_columns, rows)?;
-
-                    let column = DataColumnWithField::new(
-                        column,
-                        DataField::new(&f.name, f.return_type.clone(), f.is_nullable),
-                    );
-
-                    column_map.insert(f.name.as_str(), column);
+                    let column_with_field = self.execute_function(&mut column_map, f, rows)?;
+                    column_map.insert(f.name.as_str(), column_with_field);
                 }
                 ExpressionAction::Constant(constant) => {
-                    let column = DataColumn::Constant(constant.value.clone(), rows);
+                    let column = constant
+                        .data_type
+                        .create_constant_column(&constant.value, rows)?;
 
-                    let column = DataColumnWithField::new(
+                    let column = ColumnWithField::new(
                         column,
-                        DataField::new(
-                            constant.name.as_str(),
-                            constant.data_type.clone(),
-                            constant.value.is_null(),
-                        ),
+                        DataField::new(constant.name.as_str(), constant.data_type.clone()),
                     );
 
                     column_map.insert(constant.name.as_str(), column);
@@ -187,6 +162,30 @@ impl ExpressionExecutor {
         Ok(DataBlock::create(
             self.output_schema.clone(),
             project_columns,
+        ))
+    }
+
+    #[inline]
+    fn execute_function(
+        &self,
+        column_map: &mut HashMap<&str, ColumnWithField>,
+        f: &ActionFunction,
+        rows: usize,
+    ) -> Result<ColumnWithField> {
+        // check if it's cached
+        let mut arg_columns = Vec::with_capacity(f.arg_names.len());
+
+        for arg in f.arg_names.iter() {
+            let column = column_map.get(arg.as_str()).cloned().ok_or_else(|| {
+                ErrorCode::LogicalError("Arguments must be prepared before function transform")
+            })?;
+            arg_columns.push(column);
+        }
+
+        let column = f.func.eval(&arg_columns, rows)?;
+        Ok(ColumnWithField::new(
+            column,
+            DataField::new(&f.name, f.return_type.clone()),
         ))
     }
 }

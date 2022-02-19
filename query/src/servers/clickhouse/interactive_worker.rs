@@ -18,13 +18,14 @@ use std::time::Instant;
 use common_clickhouse_srv::connection::Connection;
 use common_clickhouse_srv::CHContext;
 use common_clickhouse_srv::ClickHouseSession;
+use common_tracing::tracing;
 use metrics::histogram;
 
 use crate::servers::clickhouse::interactive_worker_base::InteractiveWorkerBase;
 use crate::servers::clickhouse::writers::to_clickhouse_err;
 use crate::servers::clickhouse::writers::QueryWriter;
 use crate::sessions::SessionRef;
-use crate::users::CertifiedInfo;
+use crate::users::auth::auth_mgr::Credential;
 
 pub struct InteractiveWorker {
     session: SessionRef,
@@ -97,36 +98,38 @@ impl ClickHouseSession for InteractiveWorker {
         54405
     }
 
-    fn authenticate(&self, user: &str, password: &[u8], client_addr: &str) -> bool {
-        let info = CertifiedInfo::create(user, password, client_addr);
-
-        let user_manager = self.session.get_user_manager();
-        // TODO: push async up to clickhouse server lib
-        futures::executor::block_on(async move {
-            // TODO: use get_users and check client address
-            let res = match user_manager.get_user(user, "%").await {
-                Ok(user_info) => user_manager.auth_user(user_info, info).await,
-                Err(err) => Err(err),
-            };
-            match res {
-                Ok(res) => {
-                    self.session.set_current_user(user.to_string());
-                    res
-                }
-                Err(failure) => {
-                    log::error!(
-                        "ClickHouse handler authenticate failed, \
+    async fn authenticate(&self, user: &str, password: &[u8], client_addr: &str) -> bool {
+        // Here we don't handle the create context error.
+        let client_ip = client_addr.split(':').collect::<Vec<_>>()[0];
+        let credential = Credential::Password {
+            name: user.to_string(),
+            password: Some(password.to_owned()),
+            hostname: Some(client_ip.to_string()),
+        };
+        let user_info_auth = self
+            .session
+            .get_session_manager()
+            .get_auth_manager()
+            .auth(&credential)
+            .await;
+        match user_info_auth {
+            Ok(user_info) => {
+                self.session.set_current_user(user_info);
+                true
+            }
+            Err(failure) => {
+                tracing::error!(
+                    "ClickHouse handler authenticate failed, \
                         user: {}, \
                         client_address: {}, \
                         cause: {:?}",
-                        user,
-                        client_addr,
-                        failure
-                    );
-                    false
-                }
+                    user,
+                    client_addr,
+                    failure
+                );
+                false
             }
-        })
+        }
     }
 
     // TODO: remove it

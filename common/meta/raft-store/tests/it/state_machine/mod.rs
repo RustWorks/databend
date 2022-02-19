@@ -17,38 +17,39 @@ use std::convert::TryInto;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use async_raft::raft::Entry;
-use async_raft::raft::EntryNormal;
-use async_raft::raft::EntryPayload;
-use async_raft::raft::MembershipConfig;
-use async_raft::LogId;
 use common_base::tokio;
-use common_exception::ErrorCode;
 use common_meta_api::KVApi;
 use common_meta_raft_store::state_machine::testing::pretty_snapshot;
 use common_meta_raft_store::state_machine::testing::pretty_snapshot_iter;
 use common_meta_raft_store::state_machine::testing::snapshot_logs;
-use common_meta_raft_store::state_machine::AppliedState;
 use common_meta_raft_store::state_machine::SerializableSnapshot;
 use common_meta_raft_store::state_machine::StateMachine;
+use common_meta_sled_store::openraft;
+use common_meta_types::AppError;
+use common_meta_types::AppliedState;
 use common_meta_types::Change;
 use common_meta_types::Cmd;
 use common_meta_types::DatabaseMeta;
 use common_meta_types::KVMeta;
 use common_meta_types::LogEntry;
 use common_meta_types::MatchSeq;
+use common_meta_types::MetaStorageError;
 use common_meta_types::Operation;
 use common_meta_types::SeqV;
 use common_meta_types::TableMeta;
+use common_meta_types::UnknownTableId;
 use common_meta_types::UpsertTableOptionReq;
 use common_tracing::tracing;
-use maplit::btreeset;
 use maplit::hashmap;
+use openraft::raft::Entry;
+use openraft::raft::EntryPayload;
+use openraft::LogId;
 use pretty_assertions::assert_eq;
 
 use crate::init_raft_store_ut;
 use crate::testing::new_raft_test_context;
 
+mod database_lookup;
 mod meta_api_impl;
 mod placement;
 
@@ -63,20 +64,31 @@ async fn test_state_machine_apply_non_dup_incr_seq() -> anyhow::Result<()> {
     for i in 0..3 {
         // incr "foo"
 
-        let resp = sm
-            .apply_cmd(&Cmd::IncrSeq {
-                key: "foo".to_string(),
-            })
-            .await?;
+        let resp = sm.sm_tree.txn(true, |t| {
+            Ok(sm
+                .apply_cmd(
+                    &Cmd::IncrSeq {
+                        key: "foo".to_string(),
+                    },
+                    &t,
+                )
+                .unwrap())
+        })?;
+
         assert_eq!(AppliedState::Seq { seq: i + 1 }, resp);
 
         // incr "bar"
 
-        let resp = sm
-            .apply_cmd(&Cmd::IncrSeq {
-                key: "bar".to_string(),
-            })
-            .await?;
+        let resp = sm.sm_tree.txn(true, |t| {
+            Ok(sm
+                .apply_cmd(
+                    &Cmd::IncrSeq {
+                        key: "bar".to_string(),
+                    },
+                    &t,
+                )
+                .unwrap())
+        })?;
         assert_eq!(AppliedState::Seq { seq: i + 1 }, resp);
     }
 
@@ -97,11 +109,9 @@ async fn test_state_machine_apply_incr_seq() -> anyhow::Result<()> {
         let resp = sm
             .apply(&Entry {
                 log_id: LogId { term: 0, index: 5 },
-                payload: EntryPayload::Normal(EntryNormal {
-                    data: LogEntry {
-                        txid: txid.clone(),
-                        cmd: Cmd::IncrSeq { key: k.to_string() },
-                    },
+                payload: EntryPayload::Normal(LogEntry {
+                    txid: txid.clone(),
+                    cmd: Cmd::IncrSeq { key: k.to_string() },
                 }),
             })
             .await?;
@@ -118,6 +128,7 @@ async fn test_state_machine_apply_add_database() -> anyhow::Result<()> {
 
     let tc = new_raft_test_context();
     let m = StateMachine::open(&tc.raft_config, 1).await?;
+    let tenant = "tenant1";
 
     struct T {
         name: &'static str,
@@ -146,12 +157,20 @@ async fn test_state_machine_apply_add_database() -> anyhow::Result<()> {
     for (i, c) in cases.iter().enumerate() {
         // add
 
-        let resp = m
-            .apply_cmd(&Cmd::CreateDatabase {
-                name: c.name.to_string(),
-                engine: c.engine.to_string(),
-            })
-            .await?;
+        let resp = m.sm_tree.txn(true, |t| {
+            Ok(m.apply_cmd(
+                &Cmd::CreateDatabase {
+                    tenant: tenant.to_string(),
+                    name: c.name.to_string(),
+                    meta: DatabaseMeta {
+                        engine: c.engine.to_string(),
+                        ..Default::default()
+                    },
+                },
+                &t,
+            )
+            .unwrap())
+        })?;
 
         let mut ch: Change<DatabaseMeta> = resp.try_into().expect("DatabaseMeta");
         let result = ch.ident.take();
@@ -164,7 +183,7 @@ async fn test_state_machine_apply_add_database() -> anyhow::Result<()> {
 
         let want = result.expect("Some(db_id)");
 
-        let got = m.get_database_id(&c.name.to_string())?;
+        let got = m.get_database_id(tenant, c.name)?;
         assert_eq!(want, got);
     }
 
@@ -178,21 +197,37 @@ async fn test_state_machine_apply_upsert_table_option() -> anyhow::Result<()> {
 
     let tc = new_raft_test_context();
     let m = StateMachine::open(&tc.raft_config, 1).await?;
+    let tenant = "tenant1";
 
     tracing::info!("--- prepare a table");
-    m.apply_cmd(&Cmd::CreateDatabase {
-        name: "db1".to_string(),
-        engine: "default".to_string(),
-    })
-    .await?;
 
-    let resp = m
-        .apply_cmd(&Cmd::CreateTable {
-            db_name: "db1".to_string(),
-            table_name: "tb1".to_string(),
-            table_meta: Default::default(),
-        })
-        .await?;
+    m.sm_tree.txn(true, |t| {
+        Ok(m.apply_cmd(
+            &Cmd::CreateDatabase {
+                tenant: tenant.to_string(),
+                name: "db1".to_string(),
+                meta: DatabaseMeta {
+                    engine: "defeault".to_string(),
+                    ..Default::default()
+                },
+            },
+            &t,
+        )
+        .unwrap())
+    })?;
+
+    let resp = m.sm_tree.txn(true, |t| {
+        Ok(m.apply_cmd(
+            &Cmd::CreateTable {
+                tenant: tenant.to_string(),
+                db_name: "db1".to_string(),
+                table_name: "tb1".to_string(),
+                table_meta: Default::default(),
+            },
+            &t,
+        )
+        .unwrap())
+    })?;
 
     let mut ch: Change<TableMeta, u64> = resp.try_into().unwrap();
     let table_id = ch.ident.take().unwrap();
@@ -201,16 +236,20 @@ async fn test_state_machine_apply_upsert_table_option() -> anyhow::Result<()> {
 
     tracing::info!("--- upsert options on empty table options");
     {
-        let resp = m
-            .apply_cmd(&Cmd::UpsertTableOptions(UpsertTableOptionReq {
-                table_id,
-                seq: MatchSeq::Exact(version),
-                options: hashmap! {
-                    "a".to_string() => Some("A".to_string()),
-                    "b".to_string() => None,
-                },
-            }))
-            .await?;
+        let resp = m.sm_tree.txn(true, |t| {
+            Ok(m.apply_cmd(
+                &Cmd::UpsertTableOptions(UpsertTableOptionReq {
+                    table_id,
+                    seq: MatchSeq::Exact(version),
+                    options: hashmap! {
+                        "a".to_string() => Some("A".to_string()),
+                        "b".to_string() => None,
+                    },
+                }),
+                &t,
+            )
+            .unwrap())
+        })?;
 
         let ch: Change<TableMeta> = resp.try_into().unwrap();
         let (prev, result) = ch.unwrap();
@@ -250,28 +289,42 @@ async fn test_state_machine_apply_upsert_table_option() -> anyhow::Result<()> {
 
     tracing::info!("--- update with invalid table_id");
     {
-        let resp = m
-            .apply_cmd(&Cmd::UpsertTableOptions(UpsertTableOptionReq {
-                table_id: 0,
-                seq: MatchSeq::Exact(version - 1),
-                options: hashmap! {},
-            }))
-            .await;
+        m.sm_tree.txn(true, |t| {
+            let r = m.apply_cmd(
+                &Cmd::UpsertTableOptions(UpsertTableOptionReq {
+                    table_id: 0,
+                    seq: MatchSeq::Exact(version - 1),
+                    options: hashmap! {},
+                }),
+                &t,
+            );
 
-        let err = resp.unwrap_err();
+            let err = r.unwrap_err();
+            assert_eq!(
+                MetaStorageError::AppError(AppError::UnknownTableId(UnknownTableId::new(
+                    0,
+                    String::from("apply_upsert_table_options_cmd")
+                ))),
+                err
+            );
 
-        assert_eq!(ErrorCode::UnknownTableIdCode(), err.code());
+            Ok(AppliedState::None)
+        })?;
     }
 
     tracing::info!("--- update with mismatched seq wont update anything");
     {
-        let resp = m
-            .apply_cmd(&Cmd::UpsertTableOptions(UpsertTableOptionReq {
-                table_id,
-                seq: MatchSeq::Exact(version - 1),
-                options: hashmap! {},
-            }))
-            .await?;
+        let resp = m.sm_tree.txn(true, |t| {
+            Ok(m.apply_cmd(
+                &Cmd::UpsertTableOptions(UpsertTableOptionReq {
+                    table_id,
+                    seq: MatchSeq::Exact(version - 1),
+                    options: hashmap! {},
+                }),
+                &t,
+            )
+            .unwrap())
+        })?;
 
         let ch: Change<TableMeta> = resp.try_into().unwrap();
         let (prev, result) = ch.unwrap();
@@ -281,16 +334,20 @@ async fn test_state_machine_apply_upsert_table_option() -> anyhow::Result<()> {
 
     tracing::info!("--- update OK");
     {
-        let resp = m
-            .apply_cmd(&Cmd::UpsertTableOptions(UpsertTableOptionReq {
-                table_id,
-                seq: MatchSeq::Exact(version),
-                options: hashmap! {
-                    "a".to_string() => None,
-                    "c".to_string() => Some("C".to_string()),
-                },
-            }))
-            .await?;
+        let resp = m.sm_tree.txn(true, |t| {
+            Ok(m.apply_cmd(
+                &Cmd::UpsertTableOptions(UpsertTableOptionReq {
+                    table_id,
+                    seq: MatchSeq::Exact(version),
+                    options: hashmap! {
+                        "a".to_string() => None,
+                        "c".to_string() => Some("C".to_string()),
+                    },
+                }),
+                &t,
+            )
+            .unwrap())
+        })?;
 
         let ch: Change<TableMeta> = resp.try_into().unwrap();
         let (prev, result) = ch.unwrap();
@@ -425,15 +482,19 @@ async fn test_state_machine_apply_non_dup_generic_kv_upsert_get() -> anyhow::Res
         let mes = format!("{}-th: {}({:?})={:?}", i, c.key, c.seq, c.value);
 
         // write
-
-        let resp = sm
-            .apply_cmd(&Cmd::UpsertKV {
-                key: c.key.clone(),
-                seq: c.seq,
-                value: Some(c.value.clone()).into(),
-                value_meta: c.value_meta.clone(),
-            })
-            .await?;
+        let resp = sm.sm_tree.txn(true, |t| {
+            Ok(sm
+                .apply_cmd(
+                    &Cmd::UpsertKV {
+                        key: c.key.clone(),
+                        seq: c.seq,
+                        value: Some(c.value.clone()).into(),
+                        value_meta: c.value_meta.clone(),
+                    },
+                    &t,
+                )
+                .unwrap())
+        })?;
         assert_eq!(
             AppliedState::KV(Change::new(c.prev.clone(), c.result.clone())),
             resp,
@@ -487,16 +548,21 @@ async fn test_state_machine_apply_non_dup_generic_kv_value_meta() -> anyhow::Res
 
     tracing::info!("--- update meta of a nonexistent record");
 
-    let resp = sm
-        .apply_cmd(&Cmd::UpsertKV {
-            key: key.clone(),
-            seq: MatchSeq::Any,
-            value: Operation::AsIs,
-            value_meta: Some(KVMeta {
-                expire_at: Some(now + 10),
-            }),
-        })
-        .await?;
+    let resp = sm.sm_tree.txn(true, |t| {
+        Ok(sm
+            .apply_cmd(
+                &Cmd::UpsertKV {
+                    key: key.clone(),
+                    seq: MatchSeq::Any,
+                    value: Operation::AsIs,
+                    value_meta: Some(KVMeta {
+                        expire_at: Some(now + 10),
+                    }),
+                },
+                &t,
+            )
+            .unwrap())
+    })?;
 
     assert_eq!(
         AppliedState::KV(Change::new(None, None)),
@@ -507,28 +573,38 @@ async fn test_state_machine_apply_non_dup_generic_kv_value_meta() -> anyhow::Res
     tracing::info!("--- update meta of a existent record");
 
     // add a record
-    let _resp = sm
-        .apply_cmd(&Cmd::UpsertKV {
-            key: key.clone(),
-            seq: MatchSeq::Any,
-            value: Operation::Update(b"value_meta_bar".to_vec()),
-            value_meta: Some(KVMeta {
-                expire_at: Some(now + 10),
-            }),
-        })
-        .await?;
+    sm.sm_tree.txn(true, |t| {
+        Ok(sm
+            .apply_cmd(
+                &Cmd::UpsertKV {
+                    key: key.clone(),
+                    seq: MatchSeq::Any,
+                    value: Operation::Update(b"value_meta_bar".to_vec()),
+                    value_meta: Some(KVMeta {
+                        expire_at: Some(now + 10),
+                    }),
+                },
+                &t,
+            )
+            .unwrap())
+    })?;
 
     // update the meta of the record
-    let _resp = sm
-        .apply_cmd(&Cmd::UpsertKV {
-            key: key.clone(),
-            seq: MatchSeq::Any,
-            value: Operation::AsIs,
-            value_meta: Some(KVMeta {
-                expire_at: Some(now + 20),
-            }),
-        })
-        .await?;
+    sm.sm_tree.txn(true, |t| {
+        Ok(sm
+            .apply_cmd(
+                &Cmd::UpsertKV {
+                    key: key.clone(),
+                    seq: MatchSeq::Any,
+                    value: Operation::AsIs,
+                    value_meta: Some(KVMeta {
+                        expire_at: Some(now + 20),
+                    }),
+                },
+                &t,
+            )
+            .unwrap())
+    })?;
 
     tracing::info!("--- read the original value and updated meta");
 
@@ -595,23 +671,34 @@ async fn test_state_machine_apply_non_dup_generic_kv_delete() -> anyhow::Result<
         let sm = StateMachine::open(&tc.raft_config, 1).await?;
 
         // prepare an record
-        sm.apply_cmd(&Cmd::UpsertKV {
-            key: "foo".to_string(),
-            seq: MatchSeq::Any,
-            value: Some(b"x".to_vec()).into(),
-            value_meta: None,
-        })
-        .await?;
+        sm.sm_tree.txn(true, |t| {
+            Ok(sm
+                .apply_cmd(
+                    &Cmd::UpsertKV {
+                        key: "foo".to_string(),
+                        seq: MatchSeq::Any,
+                        value: Some(b"x".to_vec()).into(),
+                        value_meta: None,
+                    },
+                    &t,
+                )
+                .unwrap())
+        })?;
 
         // delete
-        let resp = sm
-            .apply_cmd(&Cmd::UpsertKV {
-                key: c.key.clone(),
-                seq: c.seq,
-                value: Operation::Delete,
-                value_meta: None,
-            })
-            .await?;
+        let resp = sm.sm_tree.txn(true, |t| {
+            Ok(sm
+                .apply_cmd(
+                    &Cmd::UpsertKV {
+                        key: c.key.clone(),
+                        seq: c.seq,
+                        value: Operation::Delete,
+                        value_meta: None,
+                    },
+                    &t,
+                )
+                .unwrap())
+        })?;
         assert_eq!(
             AppliedState::KV(Change::new(c.prev.clone(), c.result.clone())),
             resp,
@@ -650,17 +737,10 @@ async fn test_state_machine_snapshot() -> anyhow::Result<()> {
         sm.apply(l).await?;
     }
 
-    let (it, last, mem, id) = sm.snapshot()?;
+    let (it, last, id) = sm.snapshot()?;
 
     assert_eq!(LogId { term: 1, index: 9 }, last);
     assert!(id.starts_with(&format!("{}-{}-", 1, 9)));
-    assert_eq!(
-        MembershipConfig {
-            members: btreeset![4, 5, 6],
-            members_after_consensus: None,
-        },
-        mem
-    );
 
     let res = pretty_snapshot_iter(it);
     assert_eq!(want, res);
@@ -668,7 +748,7 @@ async fn test_state_machine_snapshot() -> anyhow::Result<()> {
     // test serialized snapshot
 
     {
-        let (it, _last, _mem, _id) = sm.snapshot()?;
+        let (it, _last, _id) = sm.snapshot()?;
 
         let data = StateMachine::serialize_snapshot(it)?;
 

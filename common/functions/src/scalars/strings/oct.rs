@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::fmt;
 
-use common_arrow::arrow_format::ipc::flatbuffers::bitflags::_core::cmp::Ordering;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
+use crate::scalars::cast_column_field;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 trait OctString {
     fn oct_string(self) -> String;
@@ -63,7 +64,7 @@ impl OctFunction {
 
     pub fn desc() -> FunctionDescription {
         FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic())
+            .features(FunctionFeatures::default().deterministic().num_arguments(1))
     }
 }
 
@@ -72,56 +73,37 @@ impl Function for OctFunction {
         "oct"
     }
 
-    fn num_arguments(&self) -> usize {
-        1
-    }
-
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if !args[0].is_integer() && args[0] != DataType::String && args[0] != DataType::Null {
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        if !args[0].data_type_id().is_numeric() {
             return Err(ErrorCode::IllegalDataType(format!(
-                "Expected integer or string or null, but got {}",
-                args[0]
+                "Expected integer but got {}",
+                args[0].data_type_id()
             )));
         }
 
-        Ok(DataType::String)
+        Ok(StringType::arc())
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(true)
-    }
+    fn eval(&self, columns: &ColumnsWithField, input_rows: usize) -> Result<ColumnRef> {
+        let mut builder: ColumnBuilder<Vu8> = ColumnBuilder::with_capacity(input_rows);
 
-    fn eval(&self, columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
-        match columns[0].data_type() {
-            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                let mut string_array = StringArrayBuilder::with_capacity(input_rows);
-                for value in columns[0]
-                    .column()
-                    .cast_with_type(&DataType::UInt64)?
-                    .to_minimal_array()?
-                    .u64()?
-                {
-                    string_array.append_option(value.map(|n| n.oct_string()));
+        match columns[0].data_type().data_type_id() {
+            TypeID::UInt8 | TypeID::UInt16 | TypeID::UInt32 | TypeID::UInt64 => {
+                let col = cast_column_field(&columns[0], &UInt64Type::arc())?;
+                let col = col.as_any().downcast_ref::<UInt64Column>().unwrap();
+                for val in col.iter() {
+                    builder.append(val.oct_string().as_bytes());
                 }
-
-                let column: DataColumn = string_array.finish().into();
-                Ok(column.resize_constant(columns[0].column().len()))
             }
             _ => {
-                let mut string_array = StringArrayBuilder::with_capacity(input_rows);
-                for value in columns[0]
-                    .column()
-                    .cast_with_type(&DataType::Int64)?
-                    .to_minimal_array()?
-                    .i64()?
-                {
-                    string_array.append_option(value.map(|n| n.oct_string()));
+                let col = cast_column_field(&columns[0], &Int64Type::arc())?;
+                let col = col.as_any().downcast_ref::<Int64Column>().unwrap();
+                for val in col.iter() {
+                    builder.append(val.oct_string().as_bytes());
                 }
-
-                let column: DataColumn = string_array.finish().into();
-                Ok(column.resize_constant(columns[0].column().len()))
             }
         }
+        Ok(builder.build(input_rows))
     }
 }
 

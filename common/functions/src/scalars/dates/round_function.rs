@@ -18,7 +18,10 @@ use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
+use crate::scalars::EvalContext;
 use crate::scalars::Function;
+use crate::scalars::Monotonicity;
+use crate::scalars::ScalarUnaryExpression;
 
 #[derive(Clone)]
 pub struct RoundFunction {
@@ -50,42 +53,35 @@ impl Function for RoundFunction {
         self.display_name.as_str()
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        match args[0] {
-            DataType::DateTime32(_) => Ok(DataType::DateTime32(None)),
-            _ => Err(ErrorCode::BadDataValueType(format!(
+    fn return_type(
+        &self,
+        args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        if args[0].data_type_id() == TypeID::DateTime32 {
+            return Ok(DateTime32Type::arc(None));
+        } else {
+            return Err(ErrorCode::BadDataValueType(format!(
                 "Function {} must have a DateTime type as argument, but got {}",
-                self.display_name, args[0],
-            ))),
+                self.display_name,
+                args[0].name(),
+            )));
         }
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
+    fn eval(
+        &self,
+        columns: &common_datavalues::ColumnsWithField,
+        _input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
+        let unary = ScalarUnaryExpression::<u32, _, _>::new(|val: u32, _ctx: &mut EvalContext| {
+            self.execute(val)
+        });
+        let col = unary.eval(columns[0].column(), &mut EvalContext::default())?;
+        Ok(col.arc())
     }
 
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        match columns[0].column() {
-            DataColumn::Array(array) => {
-                let array = array.u32()?;
-                let arr = array.apply(|x| self.execute(x));
-                Ok(DataColumn::Array(arr.into_series()))
-            }
-            DataColumn::Constant(v, rows) => {
-                if v.is_null() {
-                    return Ok(DataColumn::Constant(DataValue::UInt32(None), *rows));
-                }
-                let value = v.as_u64()?;
-                Ok(DataColumn::Constant(
-                    DataValue::UInt32(Some(self.execute(value as u32))),
-                    *rows,
-                ))
-            }
-        }
-    }
-
-    fn num_arguments(&self) -> usize {
-        1
+    fn get_monotonicity(&self, args: &[Monotonicity]) -> Result<Monotonicity> {
+        Ok(Monotonicity::clone_without_range(&args[0]))
     }
 }
 

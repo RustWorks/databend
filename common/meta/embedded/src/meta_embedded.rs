@@ -21,6 +21,7 @@ use common_meta_raft_store::config::RaftConfig;
 use common_meta_raft_store::state_machine::StateMachine;
 pub use common_meta_sled_store::init_temp_sled_db;
 use common_tracing::tracing;
+use once_cell::sync::Lazy;
 
 /// Local storage that provides the API defined by `KVApi+MetaApi`.
 ///
@@ -35,6 +36,9 @@ use common_tracing::tracing;
 pub struct MetaEmbedded {
     pub(crate) inner: Arc<Mutex<StateMachine>>,
 }
+
+static GLOBAL_META_EMBEDDED: Lazy<Arc<std::sync::Mutex<Option<Arc<MetaEmbedded>>>>> =
+    Lazy::new(|| Arc::new(std::sync::Mutex::new(None)));
 
 impl MetaEmbedded {
     /// Creates a KVApi impl backed with a `StateMachine`.
@@ -78,7 +82,41 @@ impl MetaEmbedded {
         Self::new(&name).await
     }
 
-    pub fn sync_new_temp() -> common_exception::Result<MetaEmbedded> {
-        futures::executor::block_on(MetaEmbedded::new_temp())
+    /// Initialize a sled db to store embedded meta data.
+    /// Initialize a global embedded meta store.
+    /// The data in `path` won't be removed after program exit.
+    pub async fn init_global_meta_store(path: String) -> common_exception::Result<()> {
+        common_meta_sled_store::init_sled_db(path);
+
+        {
+            let mut m = GLOBAL_META_EMBEDDED.as_ref().lock().unwrap();
+            let r = m.as_ref();
+
+            if r.is_none() {
+                let meta = MetaEmbedded::new("global").await?;
+                let meta = Arc::new(meta);
+                *m = Some(meta);
+                return Ok(());
+            }
+        }
+
+        panic!("global meta store can not init twice");
+    }
+
+    /// If global meta store is initialized, return it(production use).
+    /// Otherwise, return a meta store backed with temp dir for test.
+    pub async fn get_meta() -> common_exception::Result<Arc<MetaEmbedded>> {
+        {
+            let m = GLOBAL_META_EMBEDDED.as_ref().lock().unwrap();
+            let r = m.as_ref();
+
+            if let Some(x) = r {
+                return Ok(x.clone());
+            }
+        }
+
+        let meta = MetaEmbedded::new_temp().await?;
+        let meta = Arc::new(meta);
+        Ok(meta)
     }
 }

@@ -19,76 +19,36 @@ use crate::Expression;
 use crate::PlanNode;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct InsertIntoPlan {
-    pub db_name: String,
-    pub tbl_name: String,
-    pub tbl_id: MetaId,
-    pub schema: DataSchemaRef,
-
-    pub select_plan: Option<Box<PlanNode>>,
-    pub value_exprs_opt: Option<Vec<Vec<Expression>>>,
+pub enum InsertInputSource {
+    SelectPlan(Box<PlanNode>),
+    Expressions(Vec<Vec<Expression>>),
+    StreamingWithFormat(String),
 }
 
-impl PartialEq for InsertIntoPlan {
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct InsertPlan {
+    pub database_name: String,
+    pub table_name: String,
+    pub table_id: MetaId,
+    pub schema: DataSchemaRef,
+    pub overwrite: bool,
+    pub source: InsertInputSource,
+}
+
+impl PartialEq for InsertPlan {
     fn eq(&self, other: &Self) -> bool {
-        self.db_name == other.db_name
-            && self.tbl_name == other.tbl_name
+        self.database_name == other.database_name
+            && self.table_name == other.table_name
             && self.schema == other.schema
     }
 }
 
-impl InsertIntoPlan {
+impl InsertPlan {
     pub fn schema(&self) -> DataSchemaRef {
         self.schema.clone()
     }
 
-    pub fn insert_select(
-        db: String,
-        table: String,
-        table_meta_id: MetaId,
-        schema: DataSchemaRef,
-        select_plan: PlanNode,
-    ) -> InsertIntoPlan {
-        InsertIntoPlan {
-            db_name: db,
-            tbl_name: table,
-            tbl_id: table_meta_id,
-            schema,
-            select_plan: Some(Box::new(select_plan)),
-            value_exprs_opt: None,
-        }
-    }
-
-    pub fn insert_values(
-        db: String,
-        table: String,
-        table_meta_id: MetaId,
-        schema: DataSchemaRef,
-        values: Vec<Vec<Expression>>,
-    ) -> InsertIntoPlan {
-        InsertIntoPlan {
-            db_name: db,
-            tbl_name: table,
-            tbl_id: table_meta_id,
-            schema,
-            select_plan: None,
-            value_exprs_opt: Some(values),
-        }
-    }
-
-    pub fn insert_without_source(
-        db: String,
-        table: String,
-        table_meta_id: MetaId,
-        schema: DataSchemaRef,
-    ) -> InsertIntoPlan {
-        InsertIntoPlan {
-            db_name: db,
-            tbl_name: table,
-            tbl_id: table_meta_id,
-            schema,
-            select_plan: None,
-            value_exprs_opt: None,
-        }
+    pub fn has_select_plan(&self) -> bool {
+        matches!(&self.source, InsertInputSource::SelectPlan(_))
     }
 }

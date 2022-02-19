@@ -1,11 +1,12 @@
 <div align="center">
-<p align="center"><img alt="Databend Logo" src="website/databend/docs/images/databend-logo.png" width="20%"/></p>
+
+<p align="center"><img alt="Databend Logo" src="website/static/img/favicon.svg" width="20%"/></p>
 <p align="center">The Open Source Serverless Data Warehouse for Everyone</p>
  
 <h4 align="center">
   <a href="https://databend.rs">Website</a> |
-  <a href="https://github.com/datafuselabs/databend/issues/746">Roadmap</a> |
-  <a href="https://databend.rs/overview/building-and-running/">Documentation</a>
+  <a href="https://github.com/datafuselabs/databend/issues/3706">Roadmap</a> |
+  <a href="https://databend.rs/user">Documentation</a>
 </h4>
 
 <div>
@@ -14,14 +15,10 @@
 </a>
 
 <a href="https://github.com/datafuselabs/databend/actions">
-<img src="https://github.com/datafuselabs/databend/actions/workflows/unit-tests.yml/badge.svg" alt="CI Status" />
+<img src="https://github.com/datafuselabs/databend/actions/workflows/databend-release.yml/badge.svg" alt="CI Status" />
 </a>
 
-<a href="https://codecov.io/gh/datafuselabs/databend">
-<img src="https://codecov.io/gh/datafuselabs/databend/branch/main/graph/badge.svg" alt="codecov" />
-</a>
-
-<img src="https://img.shields.io/badge/Platform-Linux,%20ARM,%20OS%20X,%20Windows-green.svg?style=flat" alt="patform" />
+<img src="https://img.shields.io/badge/Platform-Linux%2C%20macOS%2C%20ARM-green.svg?style=flat" alt="patform" />
 
 <a href="https://opensource.org/licenses/Apache-2.0">
 <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="license" />
@@ -70,7 +67,7 @@ In current implementation, the meta service has components:
 The compute layer is the clusters that running computing workloads, each cluster have many nodes, each node has components:
 * **Planner** - Builds execution plan from the user's SQL statement.
 * **Optimizer** - Optimizer rules like predicate push down or pruning of unused columns.
-* **Processors** - Vector-based query execution pipeline, which is build by planner instructions.
+* **Processors** - Vectorized Execution Engine, which is build by planner instructions.
 * **Cache** - Caching Data and Indexes based on the version.
 
 Many clusters can attach the same database, so they can serve the query in parallel by different users.
@@ -82,17 +79,23 @@ For efficient pruning, Databend also creates indexes for each Parquet file to sp
 
 ## Getting Started
 
-* [Databend Docs](https://databend.rs/overview/building-and-running/)
-* [Databend CLI Docs](https://databend.rs/cli/cli/)
-* [Databend Contributing](https://databend.rs/development/contributing/)
+* [Databend Docs](https://databend.rs/user/)
+* [Databend CLI Docs](https://databend.rs/user/cli/)
+* [Databend Contributing](https://databend.rs/dev/contributing/)
 * [Databend Architecture](https://databend.rs/overview/architecture/)
 * [Databend Performance](https://databend.rs/overview/performance/)
 * [Databend Weekly](https://weekly.databend.rs/)
 
 ## Roadmap
 
-Databend is currently in **Alpha** and is not ready to be used in production, [Roadmap 2021](https://github.com/datafuselabs/databend/issues/746)
+Databend is currently in **Alpha** and is not ready to be used in production, [Roadmap 2022](https://github.com/datafuselabs/databend/issues/3706)
 
 ## License
 
 Databend is licensed under [Apache 2.0](LICENSE).
+
+## Acknowledgement
+
+### Document Hosting
+
+[![](https://www.datocms-assets.com/31049/1618983297-powered-by-vercel.svg)](https://vercel.com/?utm_source=databend&utm_campaign=oss)

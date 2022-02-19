@@ -1,4 +1,4 @@
-// Copyright 2021 Datafuse Labs.
+// Copyright 2022 Datafuse Labs.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,9 +13,12 @@
 // limitations under the License.
 
 use super::inet_aton::InetAtonFunction;
+use super::inet_aton::TryInetAtonFunction;
 use super::inet_ntoa::InetNtoaFunction;
+use super::inet_ntoa::TryInetNtoaFunction;
 use super::running_difference_function::RunningDifferenceFunction;
-use crate::scalars::function_factory::FunctionFactory;
+use super::IgnoreFunction;
+use crate::scalars::FunctionFactory;
 
 #[derive(Clone)]
 pub struct OtherFunction {}
@@ -23,9 +26,22 @@ pub struct OtherFunction {}
 impl OtherFunction {
     pub fn register(factory: &mut FunctionFactory) {
         factory.register("runningDifference", RunningDifferenceFunction::desc());
-        factory.register("inet_ntoa", InetNtoaFunction::desc());
-        factory.register("IPv4NumToString", InetNtoaFunction::desc());
+        factory.register("ignore", IgnoreFunction::desc());
+
+        // inet_aton
         factory.register("inet_aton", InetAtonFunction::desc());
         factory.register("IPv4StringToNum", InetAtonFunction::desc());
+
+        // try_inet_aton
+        factory.register("try_inet_aton", TryInetAtonFunction::desc());
+        factory.register("TryIPv4StringToNum", TryInetAtonFunction::desc());
+
+        // inet_ntoa
+        factory.register("inet_ntoa", InetNtoaFunction::desc());
+        factory.register("IPv4NumToString", InetNtoaFunction::desc());
+
+        // try_inet_ntoa
+        factory.register("try_inet_ntoa", TryInetNtoaFunction::desc());
+        factory.register("TryIPv4NumToString", TryInetNtoaFunction::desc());
     }
 }

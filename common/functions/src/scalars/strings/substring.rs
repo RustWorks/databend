@@ -13,79 +13,137 @@
 // limitations under the License.
 
 use std::fmt;
-use std::sync::Arc;
 
-use common_arrow::arrow::array::ArrayRef;
-use common_arrow::arrow::compute;
 use common_datavalues::prelude::*;
+use common_exception::ErrorCode;
 use common_exception::Result;
+use itertools::izip;
 
-use crate::scalars::function_factory::FunctionDescription;
+use crate::scalars::cast_column_field;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct SubstringFunction {
-    _display_name: String,
+    display_name: String,
 }
 
 impl SubstringFunction {
     pub fn try_create(display_name: &str) -> Result<Box<dyn Function>> {
         Ok(Box::new(SubstringFunction {
-            _display_name: display_name.to_string(),
+            display_name: display_name.to_string(),
         }))
     }
 
     pub fn desc() -> FunctionDescription {
-        FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic())
+        FunctionDescription::creator(Box::new(Self::try_create)).features(
+            FunctionFeatures::default()
+                .deterministic()
+                .variadic_arguments(2, 3),
+        )
     }
 }
 
 impl Function for SubstringFunction {
     fn name(&self) -> &str {
-        "substring"
+        &*self.display_name
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::String)
-    }
-
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        // TODO: make this function support column value as arguments rather than literal
-        let from_value = columns[1].column().try_get(0)?;
-        let mut from = from_value.as_i64()?;
-
-        if from >= 1 {
-            from -= 1;
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        if !args[0].data_type_id().is_string() && !args[0].data_type_id().is_null() {
+            return Err(ErrorCode::IllegalDataType(format!(
+                "Expected string or null, but got {}",
+                args[0].data_type_id()
+            )));
         }
 
-        let mut end = None;
-        if columns.len() >= 3 {
-            end = Some(columns[2].column().try_get(0)?.as_u64()?);
+        if !args[1].data_type_id().is_integer() && !args[1].data_type_id().is_null() {
+            return Err(ErrorCode::IllegalDataType(format!(
+                "Expected integer or string or null, but got {}",
+                args[1].data_type_id()
+            )));
         }
 
-        // todo, move these to datavalues
-        let value = columns[0].column().to_array()?;
-        let arrow_array = value.get_array_ref();
-        let result = compute::substring::substring(arrow_array.as_ref(), from, &end)?;
-        let result: ArrayRef = Arc::from(result);
-        Ok(result.into())
+        if args.len() > 2
+            && !args[2].data_type_id().is_integer()
+            && !args[2].data_type_id().is_null()
+        {
+            return Err(ErrorCode::IllegalDataType(format!(
+                "Expected integer or string or null, but got {}",
+                args[2].data_type_id()
+            )));
+        }
+
+        Ok(StringType::arc())
     }
 
-    // substring(str, from)
-    // substring(str, from, end)
-    fn variadic_arguments(&self) -> Option<(usize, usize)> {
-        Some((2, 3))
+    fn eval(&self, columns: &ColumnsWithField, input_rows: usize) -> Result<ColumnRef> {
+        let s_column = cast_column_field(&columns[0], &StringType::arc())?;
+        let s_viewer = Vu8::try_create_viewer(&s_column)?;
+
+        let p_column = cast_column_field(&columns[1], &Int64Type::arc())?;
+        let p_viewer = i64::try_create_viewer(&p_column)?;
+
+        let mut builder = ColumnBuilder::<Vu8>::with_capacity(input_rows);
+
+        if columns.len() > 2 {
+            let p2_column = cast_column_field(&columns[2], &UInt64Type::arc())?;
+            let p2_viewer = u64::try_create_viewer(&p2_column)?;
+
+            let iter = izip!(s_viewer, p_viewer, p2_viewer);
+
+            for (str, pos, len) in iter {
+                let val = substr_from_for(str, &pos, &len);
+                builder.append(val);
+            }
+        } else {
+            let iter = s_viewer.iter().zip(p_viewer.iter());
+
+            for (str, pos) in iter {
+                let val = substr_from(str, &pos);
+                builder.append(val);
+            }
+        }
+        Ok(builder.build(input_rows))
     }
 }
 
 impl fmt::Display for SubstringFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SUBSTRING")
+        write!(f, "{}", self.display_name)
     }
+}
+
+#[inline]
+fn substr_from<'a>(str: &'a [u8], pos: &i64) -> &'a [u8] {
+    substr(str, pos, &(str.len() as u64))
+}
+
+#[inline]
+fn substr_from_for<'a>(str: &'a [u8], pos: &i64, len: &u64) -> &'a [u8] {
+    substr(str, pos, len)
+}
+
+#[inline]
+fn substr<'a>(str: &'a [u8], pos: &i64, len: &u64) -> &'a [u8] {
+    if *pos > 0 && *pos <= str.len() as i64 {
+        let l = str.len() as usize;
+        let s = (*pos - 1) as usize;
+        let mut e = *len as usize + s;
+        if e > l {
+            e = l;
+        }
+        return &str[s..e];
+    }
+    if *pos < 0 && -(*pos) <= str.len() as i64 {
+        let l = str.len() as usize;
+        let s = l - -*pos as usize;
+        let mut e = *len as usize + s;
+        if e > l {
+            e = l;
+        }
+        return &str[s..e];
+    }
+    &str[0..0]
 }

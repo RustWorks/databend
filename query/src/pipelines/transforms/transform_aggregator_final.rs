@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::borrow::BorrowMut;
 use std::sync::Arc;
 use std::time::Instant;
 
 use common_datablocks::DataBlock;
-use common_datavalues::prelude::DFStringArray;
-use common_datavalues::DataSchemaRef;
+use common_datavalues::prelude::*;
+use common_datavalues::MutableColumn;
 use common_exception::Result;
 use common_functions::aggregates::get_layout_offsets;
 use common_functions::aggregates::AggregateFunctionRef;
@@ -75,6 +76,7 @@ impl Processor for AggregatorFinalTransform {
         self
     }
 
+    #[tracing::instrument(level = "debug", name = "aggregator_final_execute", skip(self))]
     async fn execute(&self) -> Result<SendableDataBlockStream> {
         tracing::debug!("execute...");
 
@@ -103,11 +105,10 @@ impl Processor for AggregatorFinalTransform {
             for (idx, func) in funcs.iter().enumerate() {
                 let place = places[idx].into();
 
-                let binary_array = block.column(idx).to_array()?;
-                let binary_array: &DFStringArray = binary_array.string()?;
-                let array = binary_array.inner();
+                let binary_array = block.column(idx);
+                let binary_array: &StringColumn = Series::check_get(binary_array)?;
 
-                let mut data = array.value(0);
+                let mut data = binary_array.get_data(0);
                 let s = funcs[idx].state_layout();
                 let temp = arena.alloc_layout(s);
                 let temp_addr = temp.into();
@@ -120,19 +121,32 @@ impl Processor for AggregatorFinalTransform {
         let delta = start.elapsed();
         tracing::debug!("Aggregator final cost: {:?}", delta);
 
-        let mut final_result = Vec::with_capacity(funcs.len());
+        let funcs_len = funcs.len();
+
+        let mut aggr_values: Vec<Box<dyn MutableColumn>> = {
+            let mut builders = vec![];
+            for func in &funcs {
+                let data_type = func.return_type()?;
+                let builder = data_type.create_mutable(1024);
+                builders.push(builder)
+            }
+            builders
+        };
+
         for (idx, func) in funcs.iter().enumerate() {
             let place = places[idx].into();
-            let merge_result = func.merge_result(place)?;
-            final_result.push(merge_result.to_series_with_size(1)?);
+            let array: &mut dyn MutableColumn = aggr_values[idx].borrow_mut();
+            let _ = func.merge_result(place, array)?;
         }
 
+        let mut columns = Vec::with_capacity(funcs_len);
+        for mut array in aggr_values {
+            let col = array.to_column();
+            columns.push(col);
+        }
         let mut blocks = vec![];
-        if !final_result.is_empty() {
-            blocks.push(DataBlock::create_by_array(
-                self.schema.clone(),
-                final_result,
-            ));
+        if !columns.is_empty() {
+            blocks.push(DataBlock::create(self.schema.clone(), columns));
         }
 
         Ok(Box::pin(DataBlockStream::create(

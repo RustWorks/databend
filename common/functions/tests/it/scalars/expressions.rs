@@ -12,158 +12,178 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_datavalues::prelude::*;
 use common_exception::Result;
 use common_functions::scalars::*;
-use pretty_assertions::assert_eq;
+
+use super::scalar_function2_test::ScalarFunctionWithFieldTest;
+use crate::scalars::scalar_function2_test::test_scalar_functions;
+use crate::scalars::scalar_function2_test::test_scalar_functions_with_type;
+use crate::scalars::scalar_function2_test::ScalarFunctionTest;
 
 #[test]
 fn test_cast_function() -> Result<()> {
-    #[allow(dead_code)]
-    struct Test {
-        name: &'static str,
-        display: &'static str,
-        nullable: bool,
-        columns: Vec<DataColumn>,
-        column_types: Vec<DataType>,
-        expect: Series,
-        error: &'static str,
-        func: Result<Box<dyn Function>>,
-    }
-
     let tests = vec![
-        Test {
+        (CastFunction::create("cast", "int8")?, ScalarFunctionTest {
             name: "cast-int64-to-int8-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec![4i64, 3, 2, 4]).into()],
-            column_types: vec![DataType::Int64],
-            func: CastFunction::create("toint8".to_string(), DataType::Int8),
-            expect: Series::new(vec![4i8, 3, 2, 4]),
+            columns: vec![Series::from_data(vec![4i64, 3, 2, 4])],
+            expect: Series::from_data(vec![4i8, 3, 2, 4]),
             error: "",
-        },
-        Test {
+        }),
+        (CastFunction::create("cast", "int8")?, ScalarFunctionTest {
             name: "cast-string-to-int8-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["4", "3", "2", "4"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("toint8".to_string(), DataType::Int8),
-            expect: Series::new(vec![4i8, 3, 2, 4]),
+            columns: vec![Series::from_data(vec!["4", "3", "2", "4"])],
+            expect: Series::from_data(vec![4i8, 3, 2, 4]),
             error: "",
-        },
-        Test {
+        }),
+        (CastFunction::create("cast", "int16")?, ScalarFunctionTest {
             name: "cast-string-to-int16-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["4", "3", "2", "4"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("toint16".to_string(), DataType::Int16),
-            expect: Series::new(vec![4i16, 3, 2, 4]),
+            columns: vec![Series::from_data(vec!["4", "3", "2", "4"])],
+            expect: Series::from_data(vec![4i16, 3, 2, 4]),
             error: "",
-        },
-        Test {
+        }),
+        (CastFunction::create("cast", "int32")?, ScalarFunctionTest {
             name: "cast-string-to-int32-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["4", "3", "2", "4"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("toint32".to_string(), DataType::Int32),
-            expect: Series::new(vec![4i32, 3, 2, 4]),
+            columns: vec![Series::from_data(vec!["4", "3", "2", "4"])],
+            expect: Series::from_data(vec![4i32, 3, 2, 4]),
             error: "",
-        },
-        Test {
+        }),
+        (CastFunction::create("cast", "int32")?, ScalarFunctionTest {
+            name: "cast-string-to-int32-error-passed",
+            columns: vec![Series::from_data(vec!["X4", "3", "2", "4"])],
+            expect: Series::from_data(vec![4i32, 3, 2, 4]),
+            error: "Cast error happens in casting from String to Int32",
+        }),
+        (CastFunction::create("cast", "int32")?, ScalarFunctionTest {
+            name: "cast-string-to-int32-error-as_null-passed",
+            columns: vec![Series::from_data(vec!["X4", "3", "2", "4"])],
+            expect: Series::from_data(vec![Some(0i32), Some(3), Some(2), Some(4)]),
+            error: "Cast error happens in casting from String to Int32",
+        }),
+        (CastFunction::create("cast", "int64")?, ScalarFunctionTest {
             name: "cast-string-to-int64-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["4", "3", "2", "4"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("toint64".to_string(), DataType::Int64),
-            expect: Series::new(vec![4i64, 3, 2, 4]),
+            columns: vec![Series::from_data(vec!["4", "3", "2", "4"])],
+            expect: Series::from_data(vec![4i64, 3, 2, 4]),
             error: "",
-        },
-        Test {
-            name: "cast-string-to-date16-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["2021-03-05", "2021-10-24"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("cast".to_string(), DataType::Date16),
-            expect: Series::new(vec![18691u16, 18924]),
-            error: "",
-        },
-        Test {
-            name: "cast-string-to-date32-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["2021-03-05", "2021-10-24"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("cast".to_string(), DataType::Date32),
-            expect: Series::new(vec![18691i32, 18924]),
-            error: "",
-        },
-        Test {
-            name: "cast-string-to-datetime32-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec!["2021-03-05 01:01:01", "2021-10-24 10:10:10"]).into()],
-            column_types: vec![DataType::String],
-            func: CastFunction::create("cast".to_string(), DataType::DateTime32(None)),
-            expect: Series::new(vec![1614906061u32, 1635070210]),
-            error: "",
-        },
-        Test {
-            name: "cast-date32-to-string-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec![18691i32, 18924]).into()],
-            column_types: vec![DataType::Date32],
-            func: CastFunction::create("cast".to_string(), DataType::String),
-            expect: Series::new(vec!["2021-03-05", "2021-10-24"]),
-            error: "",
-        },
-        Test {
-            name: "cast-datetime-to-string-passed",
-            display: "CAST",
-            nullable: false,
-            columns: vec![Series::new(vec![1614906061u32, 1635070210]).into()],
-            column_types: vec![DataType::DateTime32(None)],
-            func: CastFunction::create("cast".to_string(), DataType::String),
-            expect: Series::new(vec!["2021-03-05 01:01:01", "2021-10-24 10:10:10"]),
-            error: "",
-        },
+        }),
+        (
+            CastFunction::create("cast", "date16")?,
+            ScalarFunctionTest {
+                name: "cast-string-to-date16-passed",
+                columns: vec![Series::from_data(vec!["2021-03-05", "2021-10-24"])],
+                expect: Series::from_data(vec![18691u16, 18924]),
+                error: "",
+            },
+        ),
+        (
+            CastFunction::create("cast", "date32")?,
+            ScalarFunctionTest {
+                name: "cast-string-to-date32-passed",
+                columns: vec![Series::from_data(vec!["2021-03-05", "2021-10-24"])],
+                expect: Series::from_data(vec![18691i32, 18924]),
+                error: "",
+            },
+        ),
+        (
+            CastFunction::create("cast", "datetime32")?,
+            ScalarFunctionTest {
+                name: "cast-string-to-datetime32-passed",
+                columns: vec![Series::from_data(vec![
+                    "2021-03-05 01:01:01",
+                    "2021-10-24 10:10:10",
+                ])],
+                expect: Series::from_data(vec![1614906061u32, 1635070210]),
+                error: "",
+            },
+        ),
     ];
 
-    for t in tests {
-        let rows = t.columns[0].len();
-
-        let columns: Vec<DataColumnWithField> = t
-            .columns
-            .iter()
-            .zip(t.column_types.iter())
-            .map(|(c, t)| {
-                let dummy = DataField::new("dummy", t.clone(), false);
-                DataColumnWithField::new(c.clone(), dummy)
-            })
-            .collect();
-
-        let func = t.func.unwrap();
-        if let Err(e) = func.eval(&columns, rows) {
-            assert_eq!(t.error, e.to_string());
-        }
-        // Display check.
-        let expect_display = t.display.to_string();
-        let actual_display = format!("{}", func);
-        assert_eq!(expect_display, actual_display);
-
-        // Nullable check.
-        let expect_null = t.nullable;
-        let actual_null = func.nullable(&DataSchema::empty())?;
-        assert_eq!(expect_null, actual_null);
-
-        let v = &(func.eval(&columns, rows)?);
-        let c: DataColumn = t.expect.into();
-        assert_eq!(v, &c);
+    for (test_func, test) in tests {
+        test_scalar_functions(test_func, &[test])?;
     }
+
     Ok(())
+}
+
+#[test]
+fn test_datetime_cast_function() -> Result<()> {
+    let tests = vec![
+        (
+            CastFunction::create("cast", "string")?,
+            ScalarFunctionWithFieldTest {
+                name: "cast-date32-to-string-passed",
+                columns: vec![ColumnWithField::new(
+                    Series::from_data(vec![18691i32, 18924]),
+                    DataField::new("dummy_1", Date32Type::arc()),
+                )],
+                expect: Series::from_data(vec!["2021-03-05", "2021-10-24"]),
+                error: "",
+            },
+        ),
+        (
+            CastFunction::create("cast", "string")?,
+            ScalarFunctionWithFieldTest {
+                name: "cast-datetime-to-string-passed",
+                columns: vec![ColumnWithField::new(
+                    Series::from_data(vec![1614906061u32, 1635070210]),
+                    DataField::new("dummy_1", DateTime32Type::arc(None)),
+                )],
+                expect: Series::from_data(vec!["2021-03-05 01:01:01", "2021-10-24 10:10:10"]),
+                error: "",
+            },
+        ),
+    ];
+
+    for (test_func, test) in tests {
+        test_scalar_functions_with_type(test_func, &[test])?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_binary_contains() {
+    //create two string columns
+    struct Contains {}
+
+    impl ScalarBinaryFunction<Vu8, Vu8, bool> for Contains {
+        fn eval(&self, a: &'_ [u8], b: &'_ [u8], _ctx: &mut EvalContext) -> bool {
+            a.windows(b.len()).any(|window| window == b)
+        }
+    }
+
+    let binary_expression = ScalarBinaryExpression::<Vec<u8>, Vec<u8>, bool, _>::new(Contains {});
+
+    for _ in 0..10 {
+        let l = Series::from_data(vec!["11", "22", "33"]);
+        let r = Series::from_data(vec!["1", "2", "43"]);
+        let expected = Series::from_data(vec![true, true, false]);
+        let result = binary_expression
+            .eval(&l, &r, &mut EvalContext::default())
+            .unwrap();
+        let result = Arc::new(result) as ColumnRef;
+        assert!(result == expected);
+    }
+}
+
+#[test]
+fn test_unary_size() {
+    struct LenFunc {}
+
+    impl ScalarUnaryFunction<Vu8, i32> for LenFunc {
+        fn eval(&self, l: &[u8], _ctx: &mut EvalContext) -> i32 {
+            l.len() as i32
+        }
+    }
+
+    let mut ctx = EvalContext::default();
+
+    let l = Series::from_data(vec!["11", "22", "333"]);
+    let expected = Series::from_data(vec![2i32, 2, 3]);
+    let unary_expression = ScalarUnaryExpression::<Vec<u8>, i32, _>::new(LenFunc {});
+    let result = unary_expression.eval(&l, &mut ctx).unwrap();
+    let result = Arc::new(result) as ColumnRef;
+    assert!(result == expected);
 }

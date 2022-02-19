@@ -23,6 +23,7 @@ use crate::cmds::command::Command;
 use crate::cmds::completions::completion::CompletionCommand;
 use crate::cmds::config;
 use crate::cmds::config::Config;
+use crate::cmds::generates::generate::GenerateCommand;
 use crate::cmds::loads::load::LoadCommand;
 use crate::cmds::queries::query::QueryCommand;
 use crate::cmds::ups::up::UpCommand;
@@ -52,7 +53,7 @@ impl Command for RootCommand {
             .arg(
                 Arg::new("group")
                     .long("group")
-                    .about("Sets the group name for configuration")
+                    .help("Sets the group name for configuration")
                     .default_value("local")
                     .env("DATABEND_GROUP")
                     .global(true)
@@ -61,7 +62,7 @@ impl Command for RootCommand {
             .arg(
                 Arg::new("databend_dir")
                     .long("databend_dir")
-                    .about("Sets the directory to store databend binaries(query and store)")
+                    .help("Sets the directory to store databend binaries(query and store)")
                     .default_value("~/.databend")
                     .env("databend_dir")
                     .global(true)
@@ -71,7 +72,7 @@ impl Command for RootCommand {
             .arg(
                 Arg::new("download_url")
                     .long("download_url")
-                    .about("Sets the url to download databend binaries")
+                    .help("Sets the url to download databend binaries")
                     .default_value(config::REPO_DATABEND_URL)
                     .env("DOWNLOAD_URL")
                     .global(true)
@@ -80,7 +81,7 @@ impl Command for RootCommand {
             .arg(
                 Arg::new("tag_url")
                     .long("tag_url")
-                    .about("Sets the url to for databend tags")
+                    .help("Sets the url to for databend tags")
                     .default_value(config::REPO_DATABEND_TAG_URL)
                     .env("DOWNLOAD_URL")
                     .global(true)
@@ -89,7 +90,7 @@ impl Command for RootCommand {
             .arg(
                 Arg::new("validation_url")
                     .long("validation_url")
-                    .about("Sets the url to validate on custom download network connection")
+                    .help("Sets the url to validate on custom download network connection")
                     .env("DOWNLOAD_VALIDATION_URL")
                     .default_value(config::REPO_DATABEND_TAG_URL)
                     .global(true)
@@ -98,7 +99,7 @@ impl Command for RootCommand {
             .arg(
                 Arg::new("playground_url")
                     .long("playground_url")
-                    .about("Sets the url to download databend playground")
+                    .help("Sets the url to download databend playground")
                     .env("DOWNLOAD_PLAYGROUND_URL")
                     .default_value(config::REPO_PLAYGROUND_URL)
                     .global(true)
@@ -106,8 +107,8 @@ impl Command for RootCommand {
             )
             .arg(
                 Arg::new("log_level")
-                    .long("log-level")
-                    .about("Sets the log-level for current settings")
+                    .long("log_level")
+                    .help("Sets the log_level for current settings")
                     .env("BEND_LOG_LEVEL")
                     .default_value("info")
                     .global(true)
@@ -120,6 +121,7 @@ impl Command for RootCommand {
             .subcommand(QueryCommand::default().clap())
             .subcommand(UpCommand::default().clap())
             .subcommand(LoadCommand::default().clap())
+            .subcommand(GenerateCommand::default().clap())
     }
 
     fn about(&self) -> &'static str {
@@ -134,8 +136,9 @@ impl Command for RootCommand {
             Arc::new(ClusterCommand::create(config.clone())),
             Arc::new(QueryCommand::create(config.clone())),
             Arc::new(LoadCommand::create(config.clone())),
-            Arc::new(UpCommand::create(config)),
+            Arc::new(UpCommand::create(config.clone())),
             Arc::new(CompletionCommand::create()),
+            Arc::new(GenerateCommand::create(config)),
         ]
     }
 

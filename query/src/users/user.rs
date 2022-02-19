@@ -11,48 +11,39 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
-use common_meta_types::AuthType;
+use common_meta_types::AuthInfo;
+use common_meta_types::UserGrantSet;
 use common_meta_types::UserInfo;
-use common_meta_types::UserPrivilege;
 use common_meta_types::UserQuota;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct User {
     name: String,
     hostname: String,
-    password: String,
-    auth_type: AuthType,
+    auth_data: AuthInfo,
 }
 
 impl User {
-    pub fn new(
-        name: impl Into<String>,
-        hostname: impl Into<String>,
-        password: impl Into<String>,
-        auth_type: AuthType,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, hostname: impl Into<String>, auth_info: AuthInfo) -> Self {
         User {
             name: name.into(),
             hostname: hostname.into(),
-            password: password.into(),
-            auth_type,
+            auth_data: auth_info,
         }
     }
 }
 
 impl From<&User> for UserInfo {
     fn from(user: &User) -> Self {
-        let privileges = UserPrivilege::empty();
+        let grants = UserGrantSet::empty();
         let quota = UserQuota::no_limit();
 
         UserInfo {
             name: user.name.clone(),
             hostname: user.hostname.clone(),
-            password: Vec::from(user.password.clone()),
-            auth_type: user.auth_type.clone(),
-            privileges,
+            auth_info: user.auth_data.clone(),
+            grants,
             quota,
         }
     }

@@ -30,7 +30,6 @@ use sqlparser::ast::OrderByExpr;
 use sqlparser::ast::SelectItem;
 use sqlparser::ast::TableWithJoins;
 
-use crate::catalogs::ToReadDataSourcePlan;
 use crate::sessions::QueryContext;
 use crate::sql::statements::analyzer_statement::QueryAnalyzeState;
 use crate::sql::statements::query::JoinedSchema;
@@ -43,6 +42,7 @@ use crate::sql::statements::query::QueryNormalizer;
 use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 use crate::sql::statements::QueryRelation;
+use crate::storages::ToReadDataSourcePlan;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DfQueryStatement {
@@ -58,7 +58,7 @@ pub struct DfQueryStatement {
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfQueryStatement {
-    #[tracing::instrument(level = "info", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn analyze(&self, ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
         let analyzer = JoinedSchemaAnalyzer::create(ctx.clone());
         let mut joined_schema = analyzer.analyze(self).await?;

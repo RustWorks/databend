@@ -41,7 +41,7 @@ impl SwitchCommand {
         let resp = ureq::get(tag_url.as_str()).call()?;
         let json: serde_json::Value = resp.into_json().unwrap();
 
-        Ok(format!("{}", json[0]["name"]).replace("\"", ""))
+        Ok(format!("{}", json[0]["name"]).replace('\"', ""))
     }
 }
 
@@ -54,7 +54,7 @@ impl Command for SwitchCommand {
     fn clap(&self) -> App<'static> {
         App::new("switch")
             .about(self.about())
-            .arg(Arg::new("version").required(true).about(
+            .arg(Arg::new("version").required(true).help(
             "Version of databend package, e.g. v0.4.69-nightly. Check the versions: package list",
         ))
     }

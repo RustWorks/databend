@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_exception::ErrorCode;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::MetaResultError;
 use crate::SeqV;
 
-pub enum AddResult<T> {
+pub enum OkOrExist<T> {
     Ok(SeqV<T>),
     Exists(SeqV<T>),
+}
+
+pub struct AddResult<T, ID> {
+    pub id: Option<ID>,
+    pub res: OkOrExist<T>,
 }
 
 /// `Change` describes a state change, including the states before and after a change.
@@ -67,8 +72,8 @@ where
 
     /// Maps `Option<SeqV<T>>` to `Option<U>` for `prev` and `result`.
     pub fn map<F, U>(self, f: F) -> (Option<U>, Option<U>)
-    where F: Fn(SeqV<T>) -> U {
-        (self.prev.map(|x| f(x)), self.result.map(|x| f(x)))
+    where F: Fn(SeqV<T>) -> U + Copy {
+        (self.prev.map(f), self.result.map(f))
     }
 
     /// Extract `prev` and `result`.
@@ -94,25 +99,33 @@ where
         self.prev != self.result
     }
 
-    pub fn into_add_result(self) -> Result<AddResult<T>, ErrorCode> {
+    pub fn into_add_result(mut self) -> Result<AddResult<T, ID>, MetaResultError> {
+        let id = self.ident.take();
         let (prev, result) = self.unpack();
         if let Some(p) = prev {
             return if result.is_some() {
-                Ok(AddResult::Exists(p))
+                Ok(AddResult {
+                    id,
+                    res: OkOrExist::Exists(p),
+                })
             } else {
-                Err(ErrorCode::UnknownException(format!(
-                    "invalid result for add: prev: {:?} result: None",
-                    p
-                )))
+                Err(MetaResultError::InvalidAddResult {
+                    prev: "Some".to_string(),
+                    result: "None".to_string(),
+                })
             };
         }
 
         if let Some(res) = result {
-            Ok(AddResult::Ok(res))
+            Ok(AddResult {
+                id,
+                res: OkOrExist::Ok(res),
+            })
         } else {
-            Err(ErrorCode::UnknownException(
-                "invalid result for add: prev: None result: None".to_string(),
-            ))
+            Err(MetaResultError::InvalidAddResult {
+                prev: "None".to_string(),
+                result: "None".to_string(),
+            })
         }
     }
 }

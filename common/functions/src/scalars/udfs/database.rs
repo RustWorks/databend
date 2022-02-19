@@ -14,15 +14,12 @@
 
 use std::fmt;
 
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
+use common_datavalues::StringType;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct DatabaseFunction {}
@@ -34,8 +31,11 @@ impl DatabaseFunction {
     }
 
     pub fn desc() -> FunctionDescription {
-        FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().context_function())
+        FunctionDescription::creator(Box::new(Self::try_create)).features(
+            FunctionFeatures::default()
+                .context_function()
+                .num_arguments(1),
+        )
     }
 }
 
@@ -44,20 +44,19 @@ impl Function for DatabaseFunction {
         "DatabaseFunction"
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::String)
+    fn return_type(
+        &self,
+        _args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        Ok(StringType::arc())
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
+    fn eval(
+        &self,
+        columns: &common_datavalues::ColumnsWithField,
+        _input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
         Ok(columns[0].column().clone())
-    }
-
-    fn num_arguments(&self) -> usize {
-        1
     }
 }
 

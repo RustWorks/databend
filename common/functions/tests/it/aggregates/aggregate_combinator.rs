@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::BorrowMut;
+
 use bumpalo::Bump;
 use common_datavalues::prelude::*;
+use common_datavalues::with_match_primitive_type_id;
 use common_exception::Result;
 use common_functions::aggregates::AggregateFunctionFactory;
 use pretty_assertions::assert_eq;
@@ -25,20 +28,21 @@ fn test_aggregate_combinator_function() -> Result<()> {
         params: Vec<DataValue>,
         args: Vec<DataField>,
         display: &'static str,
-        arrays: Vec<Series>,
-        expect: DataValue,
+        arrays: Vec<ColumnRef>,
         error: &'static str,
         func_name: &'static str,
+        input_array: Box<dyn MutableColumn>,
+        expect_array: Box<dyn MutableColumn>,
     }
 
-    let arrays: Vec<Series> = vec![
-        Series::new(vec![4_i64, 3, 2, 1, 3, 4]),
-        Series::new(vec![true, true, false, true, true, true]),
+    let arrays: Vec<ColumnRef> = vec![
+        Series::from_data(vec![4_i64, 3, 2, 1, 3, 4]),
+        Series::from_data(vec![true, true, false, true, true, true]),
     ];
 
     let args = vec![
-        DataField::new("a", DataType::Int64, false),
-        DataField::new("b", DataType::Boolean, false),
+        DataField::new("a", i64::to_data_type()),
+        DataField::new("b", bool::to_data_type()),
     ];
 
     let tests = vec![
@@ -46,99 +50,143 @@ fn test_aggregate_combinator_function() -> Result<()> {
             name: "count-distinct-passed",
             params: vec![],
             args: vec![args[0].clone()],
-            display: "count",
+            display: "countdistinct",
             func_name: "countdistinct",
             arrays: vec![arrays[0].clone()],
-            expect: DataValue::UInt64(Some(4)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<u64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<u64>::from_data(
+                u64::to_data_type(),
+                Vec::from([4u64]),
+            )),
         },
         Test {
             name: "sum-distinct-passed",
             params: vec![],
             args: vec![args[0].clone()],
-            display: "sum",
+            display: "sumdistinct",
             func_name: "sumdistinct",
             arrays: vec![arrays[0].clone()],
-            expect: DataValue::UInt64(Some(10)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([10i64]),
+            )),
         },
         Test {
             name: "count-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "count",
+            display: "countif",
             func_name: "countif",
             arrays: arrays.clone(),
-            expect: DataValue::UInt64(Some(10)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<u64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<u64>::from_data(
+                u64::to_data_type(),
+                Vec::from([10u64]),
+            )),
         },
         Test {
             name: "min-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "min",
+            display: "minif",
             func_name: "minif",
             arrays: arrays.clone(),
-            expect: DataValue::UInt64(Some(1)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([1i64]),
+            )),
         },
         Test {
             name: "max-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "max",
+            display: "maxif",
             func_name: "maxif",
             arrays: arrays.clone(),
-            expect: DataValue::UInt64(Some(4)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([4i64]),
+            )),
         },
         Test {
             name: "sum-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "sum",
+            display: "sumif",
             func_name: "sumif",
             arrays: arrays.clone(),
-            expect: DataValue::UInt64(Some(30)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([30i64]),
+            )),
         },
         Test {
             name: "avg-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "avg",
+            display: "avgif",
             func_name: "avgif",
             arrays: arrays.clone(),
-            expect: DataValue::UInt64(Some(3)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<f64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<f64>::from_data(
+                f64::to_data_type(),
+                Vec::from([3f64]),
+            )),
         },
     ];
 
-    for t in tests {
+    for mut t in tests {
         let rows = t.arrays[0].len();
 
         let arena = Bump::new();
-        let func = || -> Result<()> {
+        let mut func = || -> Result<()> {
             // First.
             let factory = AggregateFunctionFactory::instance();
             let func = factory.get(t.func_name, t.params.clone(), t.args.clone())?;
             let addr = arena.alloc_layout(func.state_layout());
             func.init_state(addr.into());
-            func.accumulate(addr.into(), &t.arrays, rows)?;
+            func.accumulate(addr.into(), &t.arrays, None, rows)?;
 
             // Second.
             let addr2 = arena.alloc_layout(func.state_layout());
             func.init_state(addr2.into());
-            func.accumulate(addr2.into(), &t.arrays, rows)?;
+            func.accumulate(addr2.into(), &t.arrays, None, rows)?;
 
             func.merge(addr.into(), addr2.into())?;
-            let result = func.merge_result(addr.into())?;
-            assert_eq!(
-                format!("{:?}", t.expect),
-                format!("{:?}", result),
-                "{}",
-                t.name
-            );
+            let array: &mut dyn MutableColumn = t.input_array.borrow_mut();
+            let _ = func.merge_result(addr.into(), array)?;
+
+            let datatype = t.input_array.data_type();
+            with_match_primitive_type_id!(datatype.data_type_id(), |$T| {
+                let array = t
+                        .input_array
+                        .as_mut_any()
+                        .downcast_ref::<MutablePrimitiveColumn<$T>>()
+                        .unwrap();
+                let expect = t
+                        .expect_array
+                        .as_mut_any()
+                        .downcast_ref::<MutablePrimitiveColumn<$T>>()
+                        .unwrap();
+
+                assert_eq!(array.data_type(), expect.data_type(), "{}", t.name);
+                assert_eq!(array.values(), expect.values(), "{}", t.name);
+            },
+            {
+                panic!("shoud never reach this way");
+            });
+
             assert_eq!(t.display, format!("{:}", func), "{}", t.name);
             Ok(())
         };
@@ -157,20 +205,21 @@ fn test_aggregate_combinator_function_on_empty_data() -> Result<()> {
         params: Vec<DataValue>,
         args: Vec<DataField>,
         display: &'static str,
-        arrays: Vec<Series>,
-        expect: DataValue,
+        arrays: Vec<ColumnRef>,
         error: &'static str,
         func_name: &'static str,
+        input_array: Box<dyn MutableColumn>,
+        expect_array: Box<dyn MutableColumn>,
     }
 
-    let arrays: Vec<Series> = vec![
-        DFInt64Array::new_from_slice(&[]).into_series(),
-        DFBooleanArray::new_from_slice(&[]).into_series(),
+    let arrays: Vec<ColumnRef> = vec![
+        Int64Column::from_slice(&[]).arc(),
+        BooleanColumn::from_slice(&[]).arc(),
     ];
 
     let args = vec![
-        DataField::new("a", DataType::Int64, true),
-        DataField::new("b", DataType::Boolean, true),
+        DataField::new("a", i64::to_data_type()),
+        DataField::new("b", bool::to_data_type()),
     ];
 
     let tests = vec![
@@ -178,100 +227,130 @@ fn test_aggregate_combinator_function_on_empty_data() -> Result<()> {
             name: "count-distinct-passed",
             params: vec![],
             args: vec![args[0].clone()],
-            display: "count",
+            display: "countdistinct",
             func_name: "countdistinct",
             arrays: vec![arrays[0].clone()],
-            expect: DataValue::UInt64(Some(0)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<u64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<u64>::from_data(
+                u64::to_data_type(),
+                Vec::from([0u64]),
+            )),
         },
         Test {
             name: "sum-distinct-passed",
             params: vec![],
             args: vec![args[0].clone()],
-            display: "sum",
+            display: "sumdistinct",
             func_name: "sumdistinct",
             arrays: vec![arrays[0].clone()],
-            expect: DataValue::Int64(None),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([0i64]),
+            )),
         },
         Test {
             name: "count-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "count",
+            display: "countif",
             func_name: "countif",
             arrays: arrays.clone(),
-            expect: DataValue::UInt64(Some(0)),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<u64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<u64>::from_data(
+                u64::to_data_type(),
+                Vec::from([0u64]),
+            )),
         },
         Test {
             name: "min-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "min",
+            display: "minif",
             func_name: "minif",
             arrays: arrays.clone(),
-            expect: DataValue::Int64(None),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([0i64]),
+            )),
         },
         Test {
             name: "max-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "max",
+            display: "maxif",
             func_name: "maxif",
             arrays: arrays.clone(),
-            expect: DataValue::Int64(None),
             error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([0i64]),
+            )),
         },
         Test {
             name: "sum-if-passed",
             params: vec![],
             args: args.clone(),
-            display: "sum",
+            display: "sumif",
             func_name: "sumif",
             arrays: arrays.clone(),
-            expect: DataValue::Int64(None),
             error: "",
-        },
-        Test {
-            name: "avg-if-passed",
-            params: vec![],
-            args: args.clone(),
-            display: "avg",
-            func_name: "avgif",
-            arrays: arrays.clone(),
-            expect: DataValue::Float64(None),
-            error: "",
+            input_array: Box::new(MutablePrimitiveColumn::<i64>::default()),
+            expect_array: Box::new(MutablePrimitiveColumn::<i64>::from_data(
+                i64::to_data_type(),
+                Vec::from([0i64]),
+            )),
         },
     ];
 
-    for t in tests {
+    for mut t in tests {
         let rows = t.arrays[0].len();
 
         let arena = Bump::new();
-        let func = || -> Result<()> {
+        let mut func = || -> Result<()> {
             // First.
             let factory = AggregateFunctionFactory::instance();
             let func = factory.get(t.func_name, t.params.clone(), t.args.clone())?;
             let addr1 = arena.alloc_layout(func.state_layout());
             func.init_state(addr1.into());
 
-            func.accumulate(addr1.into(), &t.arrays, rows)?;
+            func.accumulate(addr1.into(), &t.arrays, None, rows)?;
 
             // Second.
             let addr2 = arena.alloc_layout(func.state_layout());
             func.init_state(addr2.into());
-            func.accumulate(addr2.into(), &t.arrays, rows)?;
+            func.accumulate(addr2.into(), &t.arrays, None, rows)?;
             func.merge(addr1.into(), addr2.into())?;
 
-            let result = func.merge_result(addr1.into())?;
-            assert_eq!(
-                format!("{:?}", t.expect),
-                format!("{:?}", result),
-                "{}",
-                t.name
-            );
+            let array: &mut dyn MutableColumn = t.input_array.borrow_mut();
+            let _ = func.merge_result(addr1.into(), array)?;
+
+            let datatype = t.input_array.data_type();
+            with_match_primitive_type_id!(datatype.data_type_id(), |$T| {
+                let array = t
+                        .input_array
+                        .as_mut_any()
+                        .downcast_ref::<MutablePrimitiveColumn<$T>>()
+                        .unwrap();
+                let expect = t
+                        .expect_array
+                        .as_mut_any()
+                        .downcast_ref::<MutablePrimitiveColumn<$T>>()
+                        .unwrap();
+
+                assert_eq!(array.data_type(), expect.data_type(), "{}", t.name);
+                assert_eq!(array.values(), expect.values(), "{}", t.name);
+            },
+            {
+                panic!("shoud never reach this way");
+            });
+
             assert_eq!(t.display, format!("{:}", func), "{}", t.name);
             Ok(())
         };

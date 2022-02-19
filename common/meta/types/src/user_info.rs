@@ -11,56 +11,57 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 use std::convert::TryFrom;
 
 use common_exception::ErrorCode;
 use common_exception::Result;
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::AuthType;
-use crate::UserPrivilege;
+use crate::user_grant::UserGrantSet;
+use crate::AuthInfo;
+use crate::UserIdentity;
 use crate::UserQuota;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
+#[serde(default)]
 pub struct UserInfo {
-    #[serde(default)]
     pub name: String,
 
-    #[serde(default)]
     pub hostname: String,
 
-    #[serde(default)]
-    pub password: Vec<u8>,
+    pub auth_info: AuthInfo,
 
-    #[serde(default)]
-    pub auth_type: AuthType,
+    pub grants: UserGrantSet,
 
-    #[serde(default)]
-    pub privileges: UserPrivilege,
-
-    #[serde(default)]
     pub quota: UserQuota,
 }
 
 impl UserInfo {
-    pub fn new(name: String, hostname: String, password: Vec<u8>, auth_type: AuthType) -> Self {
+    pub fn new(name: String, hostname: String, auth_info: AuthInfo) -> Self {
         // Default is no privileges.
-        let privileges = UserPrivilege::empty();
+        let grants = UserGrantSet::default();
         let quota = UserQuota::no_limit();
 
         UserInfo {
             name,
             hostname,
-            password,
-            auth_type,
-            privileges,
+            auth_info,
+            grants,
             quota,
         }
     }
 
-    pub fn set_privileges(&mut self, privileges: UserPrivilege) {
-        self.privileges |= privileges;
+    pub fn new_no_auth(name: String, hostname: String) -> Self {
+        UserInfo::new(name, hostname, AuthInfo::None)
+    }
+
+    pub fn identity(&self) -> UserIdentity {
+        UserIdentity {
+            username: self.name.clone(),
+            hostname: self.hostname.clone(),
+        }
     }
 }
 

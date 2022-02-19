@@ -16,39 +16,35 @@
 //! insipration for the crate*
 //!
 
+#![feature(generic_associated_types)]
+#![feature(trusted_len)]
+
 #[macro_use]
 mod macros;
 
-mod bit_util;
-mod data_array_filter;
+mod utils;
+
+mod columns;
 mod data_field;
 mod data_group_value;
-mod data_hasher;
 mod data_schema;
 mod data_value;
 mod data_value_operator;
-mod data_value_ops;
-mod utils;
-
-pub mod arrays;
-pub mod columns;
-pub mod prelude;
-pub mod series;
-pub mod types;
+mod scalars;
+mod types;
 
 /// third partry
 pub use chrono;
 pub use chrono_tz::Tz;
-/// Own
-pub use data_array_filter::*;
-pub use data_field::DataField;
-pub use data_group_value::DataGroupValue;
-pub use data_hasher::*;
-pub use data_schema::DataSchema;
-pub use data_schema::DataSchemaRef;
-pub use data_schema::DataSchemaRefExt;
-pub use data_value::DFTryFrom;
-pub use data_value::DataValue;
-pub use data_value::DataValueRef;
+/// current
+pub use columns::*;
+pub use data_field::*;
+pub use data_schema::*;
+pub use data_value::*;
 pub use data_value_operator::*;
+pub use prelude::*;
+pub use scalars::*;
 pub use types::*;
+pub use utils::*;
+
+pub mod prelude;

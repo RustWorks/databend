@@ -14,10 +14,7 @@
 
 use std::sync::Arc;
 
-use common_datavalues::DataField;
-use common_datavalues::DataSchemaRef;
-use common_datavalues::DataSchemaRefExt;
-use common_datavalues::DataType;
+use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::DescribeTablePlan;
@@ -36,13 +33,13 @@ pub struct DfDescribeTable {
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfDescribeTable {
-    #[tracing::instrument(level = "info", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
     async fn analyze(&self, ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
         let schema = Self::schema();
         let (db, table) = self.resolve_table(ctx)?;
 
-        Ok(AnalyzedResult::SimpleQuery(PlanNode::DescribeTable(
-            DescribeTablePlan { db, table, schema },
+        Ok(AnalyzedResult::SimpleQuery(Box::new(
+            PlanNode::DescribeTable(DescribeTablePlan { db, table, schema }),
         )))
     }
 }
@@ -65,9 +62,9 @@ impl DfDescribeTable {
 
     fn schema() -> DataSchemaRef {
         DataSchemaRefExt::create(vec![
-            DataField::new("Field", DataType::String, false),
-            DataField::new("Type", DataType::String, false),
-            DataField::new("Null", DataType::String, false),
+            DataField::new("Field", Vu8::to_data_type()),
+            DataField::new("Type", Vu8::to_data_type()),
+            DataField::new("Null", Vu8::to_data_type()),
         ])
     }
 }

@@ -14,7 +14,16 @@
 
 mod cluster;
 mod match_seq;
+mod user_defined_function;
+mod user_grant;
 mod user_info;
 mod user_privilege;
 mod user_quota;
 mod user_stage;
+
+#[test]
+fn test_bin_commit_version() -> anyhow::Result<()> {
+    let v = &common_meta_types::config::DATABEND_COMMIT_VERSION;
+    assert!(v.len() > 0);
+    Ok(())
+}

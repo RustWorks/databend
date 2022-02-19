@@ -13,13 +13,17 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_exception::ErrorCode;
 use common_meta_api::KVApi;
-use common_meta_raft_store::state_machine::AppliedState;
+use common_meta_types::AppliedState;
 use common_meta_types::Cmd;
 use common_meta_types::GetKVActionReply;
+use common_meta_types::GetKVReq;
+use common_meta_types::ListKVReq;
 use common_meta_types::LogEntry;
 use common_meta_types::MGetKVActionReply;
+use common_meta_types::MGetKVReq;
+use common_meta_types::MetaError;
+use common_meta_types::MetaResultError;
 use common_meta_types::PrefixListReply;
 use common_meta_types::UpsertKVAction;
 use common_meta_types::UpsertKVActionReply;
@@ -34,10 +38,7 @@ use crate::meta_service::MetaNode;
 /// E.g. Read is not guaranteed to see a write.
 #[async_trait]
 impl KVApi for MetaNode {
-    async fn upsert_kv(
-        &self,
-        act: UpsertKVAction,
-    ) -> common_exception::Result<UpsertKVActionReply> {
+    async fn upsert_kv(&self, act: UpsertKVAction) -> Result<UpsertKVActionReply, MetaError> {
         let ent = LogEntry {
             txid: None,
             cmd: Cmd::UpsertKV {
@@ -47,38 +48,47 @@ impl KVApi for MetaNode {
                 value_meta: act.value_meta,
             },
         };
-        let rst = self
-            .write(ent)
-            .await
-            .map_err(|e| ErrorCode::MetaNodeInternalError(e.to_string()))?;
+        let rst = self.write(ent).await?;
 
         match rst {
             AppliedState::KV(x) => Ok(x),
-            _ => Err(ErrorCode::MetaNodeInternalError("not a KV result")),
+            _ => Err(MetaError::MetaResultError(MetaResultError::InvalidType {
+                expect: "AppliedState::KV".to_string(),
+                got: "other".to_string(),
+            })),
         }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_kv(&self, key: &str) -> common_exception::Result<GetKVActionReply> {
-        // inconsistent get: from local state machine
+    async fn get_kv(&self, key: &str) -> Result<GetKVActionReply, MetaError> {
+        let res = self
+            .consistent_read(GetKVReq {
+                key: key.to_string(),
+            })
+            .await?;
 
-        let sm = self.sto.state_machine.read().await;
-        sm.get_kv(key).await
+        Ok(res)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn mget_kv(&self, keys: &[String]) -> common_exception::Result<MGetKVActionReply> {
-        // inconsistent get: from local state machine
+    async fn mget_kv(&self, keys: &[String]) -> Result<MGetKVActionReply, MetaError> {
+        let res = self
+            .consistent_read(MGetKVReq {
+                keys: keys.to_vec(),
+            })
+            .await?;
 
-        let sm = self.sto.state_machine.read().await;
-        sm.mget_kv(keys).await
+        Ok(res)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn prefix_list_kv(&self, prefix: &str) -> common_exception::Result<PrefixListReply> {
-        // inconsistent get: from local state machine
+    async fn prefix_list_kv(&self, prefix: &str) -> Result<PrefixListReply, MetaError> {
+        let res = self
+            .consistent_read(ListKVReq {
+                prefix: prefix.to_string(),
+            })
+            .await?;
 
-        let sm = self.sto.state_machine.read().await;
-        sm.prefix_list_kv(prefix).await
+        Ok(res)
     }
 }

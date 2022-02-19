@@ -1,0 +1,37 @@
+name: 'Build Debug'
+description: 'Build with debug profile'
+inputs:
+  github_token:
+    description: "Github Token"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Maximize build space
+      uses: ./.github/actions/cleanup
+
+    - uses: arduino/setup-protoc@v1
+      with:
+        version: '3.x'
+        repo-token: ${{ inputs.github_token }}
+
+    - name: Add rust target
+      shell: bash
+      run: rustup target add ${{ matrix.config.target }}
+
+    # If you need to reset the cache version, increment the number after `v`
+    - uses: Swatinem/rust-cache@v1
+      with:
+        sharedKey: debug-v1
+
+    - uses: actions-rs/cargo@v1
+      with:
+        command: build
+        use-cross: ${{ matrix.config.cross }}
+        args: --target ${{ matrix.config.target }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: debug-${{ github.sha }}-${{ matrix.config.os }}-${{ matrix.config.target }}
+        path: ./target/${{ matrix.config.target }}/debug/databend-*

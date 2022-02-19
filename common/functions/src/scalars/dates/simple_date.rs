@@ -15,6 +15,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Sub;
+use std::sync::Arc;
 
 use common_datavalues::chrono::Date;
 use common_datavalues::chrono::NaiveDate;
@@ -111,20 +112,21 @@ where T: NoArgDateFunction + Clone + Sync + Send + 'static
         self.display_name.as_str()
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Date16)
+    fn return_type(
+        &self,
+        _args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        Ok(Date16Type::arc())
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, _columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
+    fn eval(
+        &self,
+        _columns: &common_datavalues::ColumnsWithField,
+        input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
         let value = T::execute();
-        Ok(DataColumn::Constant(
-            DataValue::UInt16(Some(value)),
-            input_rows,
-        ))
+        let column = Series::from_data(&[value as u16]);
+        Ok(Arc::new(ConstColumn::new(column, input_rows)))
     }
 }
 

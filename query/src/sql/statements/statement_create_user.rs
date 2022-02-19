@@ -14,8 +14,9 @@
 
 use std::sync::Arc;
 
+use common_exception::ErrorCode;
 use common_exception::Result;
-use common_meta_types::AuthType;
+use common_meta_types::AuthInfo;
 use common_planners::CreateUserPlan;
 use common_planners::PlanNode;
 use common_tracing::tracing;
@@ -24,27 +25,44 @@ use crate::sessions::QueryContext;
 use crate::sql::statements::AnalyzableStatement;
 use crate::sql::statements::AnalyzedResult;
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DfAuthOption {
+    pub auth_type: Option<String>,
+    pub by_value: Option<String>,
+}
+
+impl DfAuthOption {
+    pub fn no_password() -> Self {
+        DfAuthOption {
+            auth_type: Some("no_password".to_string()),
+            by_value: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DfCreateUser {
     pub if_not_exists: bool,
     /// User name
     pub name: String,
     pub hostname: String,
-    pub auth_type: AuthType,
-    pub password: String,
+    pub auth_options: DfAuthOption,
 }
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfCreateUser {
-    #[tracing::instrument(level = "info", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
     async fn analyze(&self, _ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
-        Ok(AnalyzedResult::SimpleQuery(PlanNode::CreateUser(
+        Ok(AnalyzedResult::SimpleQuery(Box::new(PlanNode::CreateUser(
             CreateUserPlan {
                 name: self.name.clone(),
-                password: Vec::from(self.password.clone()),
                 hostname: self.hostname.clone(),
-                auth_type: self.auth_type.clone(),
+                auth_info: AuthInfo::create(
+                    &self.auth_options.auth_type,
+                    &self.auth_options.by_value,
+                )
+                .map_err(ErrorCode::SyntaxException)?,
             },
-        )))
+        ))))
     }
 }

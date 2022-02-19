@@ -22,16 +22,15 @@ use common_meta_sled_store::init_sled_db;
 use common_metrics::init_default_metrics_recorder;
 use common_tracing::init_global_tracing;
 use common_tracing::tracing;
-use databend_meta::api::FlightServer;
+use databend_meta::api::GrpcServer;
 use databend_meta::api::HttpService;
 use databend_meta::configs::Config;
 use databend_meta::meta_service::MetaNode;
 use databend_meta::metrics::MetricService;
-use structopt::StructOpt;
 
 #[databend_main]
 async fn main(_global_tracker: Arc<RuntimeTracker>) -> common_exception::Result<()> {
-    let conf = Config::from_args();
+    let conf = Config::load()?;
 
     let _guards = init_global_tracing(
         "databend-meta",
@@ -40,17 +39,12 @@ async fn main(_global_tracker: Arc<RuntimeTracker>) -> common_exception::Result<
     );
 
     tracing::info!("{:?}", conf.clone());
-    tracing::info!(
-        "Databend-meta v-{}",
-        *databend_meta::configs::config::DATABEND_COMMIT_VERSION
-    );
 
     init_sled_db(conf.raft_config.raft_dir.clone());
     init_default_metrics_recorder();
 
     tracing::info!(
-        "Starting MetaNode boot:{} single: {} with config: {:?}",
-        conf.raft_config.boot,
+        "Starting MetaNode single: {} with config: {:?}",
         conf.raft_config.single,
         conf
     );
@@ -70,22 +64,23 @@ async fn main(_global_tracker: Arc<RuntimeTracker>) -> common_exception::Result<
 
     // HTTP API service.
     {
-        let mut srv = HttpService::create(conf.clone());
+        let mut srv = HttpService::create(conf.clone(), meta_node.clone());
         tracing::info!("HTTP API server listening on {}", conf.admin_api_address);
         srv.start().await.expect("Failed to start http server");
         stop_handler.push(srv);
     }
 
-    // Flight API service.
+    // gRPC API service.
     {
-        let mut srv = FlightServer::create(conf.clone(), meta_node);
+        let mut srv = GrpcServer::create(conf.clone(), meta_node.clone());
         tracing::info!(
-            "Databend-meta API server listening on {}",
-            conf.flight_api_address
+            "Databend meta server listening on {}",
+            conf.grpc_api_address
         );
-        srv.start().await.expect("Databend-meta service error");
+        srv.start().await.expect("Databend meta service error");
         stop_handler.push(Box::new(srv));
     }
+
     stop_handler.wait_to_terminate(stop_tx).await;
     tracing::info!("Databend-meta is done shutting down");
 

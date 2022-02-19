@@ -22,14 +22,15 @@ use common_datablocks::DataBlock;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_tracing::tracing;
 
-use crate::servers::http::v1::block_to_json::block_to_json;
-use crate::servers::http::v1::block_to_json::JsonBlock;
-use crate::servers::http::v1::block_to_json::JsonBlockRef;
+use crate::servers::http::v1::block_to_json;
+use crate::servers::http::v1::JsonBlock;
+use crate::servers::http::v1::JsonBlockRef;
 
 const TARGET_ROWS_PER_PAGE: usize = 10000;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Wait {
     Async,
     Sync,
@@ -143,7 +144,7 @@ impl ResultDataManager {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    log::debug!("no more data");
+                    tracing::debug!("no more data");
                     end = true;
                     break;
                 }

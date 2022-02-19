@@ -18,9 +18,10 @@ use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
+use crate::scalars::cast_column_field;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 const MAX_REPEAT_TIMES: u64 = 1000000;
 
@@ -38,7 +39,7 @@ impl RepeatFunction {
 
     pub fn desc() -> FunctionDescription {
         FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic())
+            .features(FunctionFeatures::default().deterministic().num_arguments(2))
     }
 }
 
@@ -47,76 +48,40 @@ impl Function for RepeatFunction {
         "repeat"
     }
 
-    fn num_arguments(&self) -> usize {
-        2
-    }
-
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if !matches!(args[0], DataType::String | DataType::Null) {
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        if !args[0].data_type_id().is_string() && !args[0].data_type_id().is_null() {
             return Err(ErrorCode::IllegalDataType(format!(
                 "Expected parameter 1 is string, but got {}",
-                args[0]
+                args[0].data_type_id()
             )));
         }
 
-        if !args[1].is_unsigned_integer()
-            && args[1] != DataType::String
-            && args[1] != DataType::Null
-        {
+        if !args[1].data_type_id().is_unsigned_integer() && !args[1].data_type_id().is_null() {
             return Err(ErrorCode::IllegalDataType(format!(
-                "Expected parameter 2 is unsigned integer or string or null, but got {}",
-                args[1]
+                "Expected parameter 2 is unsigned integer or null, but got {}",
+                args[1].data_type_id()
             )));
         }
 
-        Ok(DataType::String)
+        Ok(StringType::arc())
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(true)
-    }
+    fn eval(&self, columns: &ColumnsWithField, input_rows: usize) -> Result<ColumnRef> {
+        let col1 = cast_column_field(&columns[0], &StringType::arc())?;
+        let col1_viewer = Vu8::try_create_viewer(&col1)?;
 
-    fn eval(&self, columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
-        match (
-            columns[0].column().cast_with_type(&DataType::String)?,
-            columns[1].column().cast_with_type(&DataType::UInt64)?,
-        ) {
-            (
-                DataColumn::Constant(DataValue::String(input_string), _),
-                DataColumn::Constant(DataValue::UInt64(times), _),
-            ) => Ok(DataColumn::Constant(
-                DataValue::String(repeat(input_string, times)?),
-                input_rows,
-            )),
-            (
-                DataColumn::Constant(DataValue::String(input_string), _),
-                DataColumn::Array(times),
-            ) => {
-                let mut string_builder = StringArrayBuilder::with_capacity(input_rows);
-                for times in times.u64()? {
-                    string_builder.append_option(repeat(input_string.as_ref(), times.copied())?);
-                }
-                Ok(string_builder.finish().into())
-            }
-            (
-                DataColumn::Array(input_string),
-                DataColumn::Constant(DataValue::UInt64(times), _),
-            ) => {
-                let mut string_builder = StringArrayBuilder::with_capacity(input_rows);
-                for input_string in input_string.string()? {
-                    string_builder.append_option(repeat(input_string, times)?);
-                }
-                Ok(string_builder.finish().into())
-            }
-            (DataColumn::Array(input_string), DataColumn::Array(times)) => {
-                let mut string_builder = StringArrayBuilder::with_capacity(input_rows);
-                for (input_string, times) in input_string.string()?.into_iter().zip(times.u64()?) {
-                    string_builder.append_option(repeat(input_string, times.copied())?);
-                }
-                Ok(string_builder.finish().into())
-            }
-            _ => Ok(DataColumn::Constant(DataValue::Null, input_rows)),
+        let col2 = cast_column_field(&columns[1], &UInt64Type::arc())?;
+        let col2_viewer = u64::try_create_viewer(&col2)?;
+
+        let mut builder = ColumnBuilder::<Vu8>::with_capacity(input_rows);
+
+        let iter = col1_viewer.iter().zip(col2_viewer.iter());
+        for (string, times) in iter {
+            let val = repeat(string, times)?;
+            builder.append(&val);
         }
+
+        Ok(builder.build(input_rows))
     }
 }
 
@@ -127,16 +92,12 @@ impl fmt::Display for RepeatFunction {
 }
 
 #[inline]
-fn repeat(string: Option<impl AsRef<[u8]>>, times: Option<u64>) -> Result<Option<Vec<u8>>> {
-    if let (Some(string), Some(times)) = (string, times) {
-        if times > MAX_REPEAT_TIMES {
-            return Err(ErrorCode::BadArguments(format!(
-                "Too many times to repeat: ({}), maximum is: {}",
-                times, MAX_REPEAT_TIMES
-            )));
-        }
-        Ok(Some(string.as_ref().repeat(times as usize)))
-    } else {
-        Ok(None)
+fn repeat(string: impl AsRef<[u8]>, times: u64) -> Result<Vec<u8>> {
+    if times > MAX_REPEAT_TIMES {
+        return Err(ErrorCode::BadArguments(format!(
+            "Too many times to repeat: ({}), maximum is: {}",
+            times, MAX_REPEAT_TIMES
+        )));
     }
+    Ok(string.as_ref().repeat(times as usize))
 }

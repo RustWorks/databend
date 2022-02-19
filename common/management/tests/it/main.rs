@@ -13,5 +13,7 @@
 // limitations under the License.
 
 mod cluster;
+mod setting;
 mod stage;
+mod udf;
 mod user;

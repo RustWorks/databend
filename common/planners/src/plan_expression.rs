@@ -16,25 +16,23 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use common_datavalues::DataField;
-use common_datavalues::DataSchemaRef;
-use common_datavalues::DataType;
-use common_datavalues::DataValue;
+use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::aggregates::AggregateFunctionFactory;
 use common_functions::aggregates::AggregateFunctionRef;
-use common_functions::scalars::FunctionFactory;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
+use crate::plan_expression_common::ExpressionDataTypeVisitor;
+use crate::ExpressionVisitor;
 use crate::PlanNode;
 
-lazy_static! {
-    static ref OP_SET: HashSet<&'static str> = ["database", "version", "current_user"]
+static OP_SET: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    ["database", "version", "current_user"]
         .iter()
         .copied()
-        .collect();
-}
+        .collect()
+});
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 pub struct ExpressionPlan {
@@ -71,7 +69,7 @@ pub enum Expression {
         column_name: Option<String>,
 
         // Logic data_type for this literal
-        data_type: DataType,
+        data_type: DataTypePtr,
     },
 
     /// A unary expression such as "NOT foo"
@@ -119,7 +117,9 @@ pub enum Expression {
         /// The expression being cast
         expr: Box<Expression>,
         /// The `DataType` the expression will yield
-        data_type: DataType,
+        data_type: DataTypePtr,
+        /// default false, if it's try_cast, is_null is true
+        is_nullable: bool,
     },
 
     /// Scalar sub query. such as `SELECT (SELECT 1)`
@@ -144,11 +144,11 @@ impl Expression {
         }
     }
 
-    pub fn create_literal_with_type(value: DataValue, data_type: DataType) -> Expression {
+    pub fn create_literal_with_type(value: DataValue, data_type: DataTypePtr) -> Expression {
         Expression::Literal {
             value,
-            column_name: None,
             data_type,
+            column_name: None,
         }
     }
 
@@ -161,7 +161,7 @@ impl Expression {
             } => match column_name {
                 Some(name) => name.clone(),
                 None => {
-                    if let DataValue::String(Some(v)) = value {
+                    if let DataValue::String(v) = value {
                         match std::str::from_utf8(v) {
                             Ok(v) => format!("'{}'", v),
                             Err(_e) => format!("{:?}", value),
@@ -172,10 +172,15 @@ impl Expression {
                 }
             },
             Expression::UnaryExpression { op, expr } => {
-                format!("({} {})", op, expr.column_name())
+                format!("({} {})", op.to_lowercase(), expr.column_name())
             }
             Expression::BinaryExpression { op, left, right } => {
-                format!("({} {} {})", left.column_name(), op, right.column_name())
+                format!(
+                    "({} {} {})",
+                    left.column_name(),
+                    op.to_lowercase(),
+                    right.column_name()
+                )
             }
             Expression::ScalarFunction { op, args } => {
                 match OP_SET.get(&op.to_lowercase().as_ref()) {
@@ -212,7 +217,9 @@ impl Expression {
                 }
             }
             Expression::Sort { expr, .. } => expr.column_name(),
-            Expression::Cast { expr, data_type } => {
+            Expression::Cast {
+                expr, data_type, ..
+            } => {
                 format!("cast({} as {:?})", expr.column_name(), data_type)
             }
             Expression::Subquery { name, .. } => name.clone(),
@@ -223,93 +230,73 @@ impl Expression {
 
     pub fn to_data_field(&self, input_schema: &DataSchemaRef) -> Result<DataField> {
         let name = self.column_name();
-        self.to_data_type(input_schema).and_then(|return_type| {
-            self.nullable(input_schema)
-                .map(|nullable| DataField::new(&name, return_type, nullable))
-        })
+        self.to_data_type(input_schema)
+            .map(|return_type| DataField::new(&name, return_type))
     }
 
-    // TODO
-    pub fn nullable(&self, _input_schema: &DataSchemaRef) -> Result<bool> {
-        Ok(false)
+    pub fn nullable(&self, input_schema: &DataSchemaRef) -> Result<bool> {
+        Ok(self.to_data_type(input_schema)?.is_nullable())
     }
 
-    pub fn to_subquery_type(subquery_plan: &PlanNode) -> DataType {
+    #[inline(always)]
+    pub fn subquery_nullable(subquery_plan: &PlanNode) -> Result<bool> {
         let subquery_schema = subquery_plan.schema();
+        let nullable = subquery_schema
+            .fields()
+            .iter()
+            .any(|field| field.is_nullable());
+        Ok(nullable)
+    }
+
+    pub fn to_subquery_type(subquery_plan: &PlanNode) -> DataTypePtr {
+        let subquery_schema = subquery_plan.schema();
+        // TODO: This may be wrong.
         let mut columns_field = Vec::with_capacity(subquery_schema.fields().len());
 
         for column_field in subquery_schema.fields() {
-            columns_field.push(DataField::new(
-                column_field.name(),
-                DataType::List(Box::new(DataField::new(
-                    "item",
-                    column_field.data_type().clone(),
-                    true,
-                ))),
-                false,
-            ));
+            let ty = ArrayType::create(column_field.data_type().clone());
+            columns_field.push(DataField::new(column_field.name(), Arc::new(ty)));
         }
 
         match columns_field.len() {
             1 => columns_field[0].data_type().clone(),
-            _ => DataType::Struct(columns_field),
+            _ => {
+                let names = columns_field.iter().map(|f| f.name().to_owned()).collect();
+                let types = columns_field
+                    .iter()
+                    .map(|f| f.data_type().to_owned())
+                    .collect();
+
+                Arc::new(StructType::create(names, types))
+            }
         }
     }
 
-    pub fn to_scalar_subquery_type(subquery_plan: &PlanNode) -> DataType {
+    pub fn to_scalar_subquery_type(subquery_plan: &PlanNode) -> DataTypePtr {
         let subquery_schema = subquery_plan.schema();
 
         match subquery_schema.fields().len() {
             1 => subquery_schema.field(0).data_type().clone(),
-            _ => DataType::Struct(subquery_schema.fields().clone()),
+            _ => {
+                let names = subquery_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().to_owned())
+                    .collect();
+                let types = subquery_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.data_type().to_owned())
+                    .collect();
+
+                Arc::new(StructType::create(names, types))
+            }
         }
     }
 
-    pub fn to_data_type(&self, input_schema: &DataSchemaRef) -> Result<DataType> {
-        match self {
-            Expression::Alias(_, expr) => expr.to_data_type(input_schema),
-            Expression::Column(s) => Ok(input_schema.field_with_name(s)?.data_type().clone()),
-            Expression::QualifiedColumn(_) => Err(ErrorCode::LogicalError(
-                "QualifiedColumn should be resolve in analyze.",
-            )),
-            Expression::Literal { data_type, .. } => Ok(data_type.clone()),
-            Expression::Subquery { query_plan, .. } => Ok(Self::to_subquery_type(query_plan)),
-            Expression::ScalarSubquery { query_plan, .. } => {
-                Ok(Self::to_scalar_subquery_type(query_plan))
-            }
-            Expression::BinaryExpression { op, left, right } => {
-                let arg_types = vec![
-                    left.to_data_type(input_schema)?,
-                    right.to_data_type(input_schema)?,
-                ];
-                let func = FunctionFactory::instance().get(op)?;
-                func.return_type(&arg_types)
-            }
-
-            Expression::UnaryExpression { op, expr } => {
-                let arg_types = vec![expr.to_data_type(input_schema)?];
-                let func = FunctionFactory::instance().get(op)?;
-                func.return_type(&arg_types)
-            }
-
-            Expression::ScalarFunction { op, args } => {
-                let mut arg_types = Vec::with_capacity(args.len());
-                for arg in args {
-                    arg_types.push(arg.to_data_type(input_schema)?);
-                }
-                let func = FunctionFactory::instance().get(op)?;
-                func.return_type(&arg_types)
-            }
-            Expression::AggregateFunction { .. } => {
-                let func = self.to_aggregate_function(input_schema)?;
-                func.return_type()
-            }
-            Expression::Wildcard => Result::Err(ErrorCode::IllegalDataType(
-                "Wildcard expressions are not valid to get return type",
-            )),
-            Expression::Cast { data_type, .. } => Ok(data_type.clone()),
-            Expression::Sort { expr, .. } => expr.to_data_type(input_schema),
-        }
+    pub fn to_data_type(&self, input_schema: &DataSchemaRef) -> Result<DataTypePtr> {
+        let visitor = ExpressionDataTypeVisitor::create(input_schema.clone());
+        visitor.visit(self)?.finalize()
     }
 
     pub fn to_aggregate_function(&self, schema: &DataSchemaRef) -> Result<AggregateFunctionRef> {
@@ -428,7 +415,9 @@ impl fmt::Debug for Expression {
 
             Expression::Sort { expr, .. } => write!(f, "{:?}", expr),
             Expression::Wildcard => write!(f, "*"),
-            Expression::Cast { expr, data_type } => {
+            Expression::Cast {
+                expr, data_type, ..
+            } => {
                 write!(f, "cast({:?} as {:?})", expr, data_type)
             }
         }

@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// https://github.com/rust-lang/rust-clippy/issues/8334
+#![allow(clippy::ptr_arg)]
+
 use std::sync::Arc;
 
+use common_tracing::tracing;
 use errors::Result;
-use log::debug;
 use protocols::Stage;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
@@ -76,7 +79,7 @@ pub trait ClickHouseSession: Send + Sync {
         Progress::default()
     }
 
-    fn authenticate(&self, _username: &str, _password: &[u8], _client_addr: &str) -> bool {
+    async fn authenticate(&self, _username: &str, _password: &[u8], _client_addr: &str) -> bool {
         true
     }
 }
@@ -145,7 +148,7 @@ impl ClickHouseServer {
     }
 
     async fn run(&mut self, session: Arc<dyn ClickHouseSession>, stream: TcpStream) -> Result<()> {
-        debug!("Handle New session");
+        tracing::debug!("Handle New session");
         let tz = session.timezone().to_string();
         let mut ctx = CHContext::new(QueryState::default());
         let mut connection = Connection::new(stream, session, tz)?;
@@ -164,7 +167,7 @@ impl ClickHouseServer {
                     return Err(e);
                 }
                 Ok(None) => {
-                    debug!("{:?}", "none data reset");
+                    tracing::debug!("{:?}", "none data reset");
                     ctx.state.reset();
                     return Ok(());
                 }

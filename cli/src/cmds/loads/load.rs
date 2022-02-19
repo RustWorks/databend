@@ -24,6 +24,7 @@ use clap::AppSettings;
 use clap::Arg;
 use clap::ArgMatches;
 use common_base::tokio::time;
+use http::HeaderMap;
 // Lets us call into_async_read() to convert a futures::stream::Stream into a
 // futures::io::AsyncRead.
 use itertools::Itertools;
@@ -33,7 +34,9 @@ use num_format::ToFormattedString;
 
 use crate::cmds::clusters::cluster::ClusterProfile;
 use crate::cmds::command::Command;
+use crate::cmds::queries::query::build_load_endpoint;
 use crate::cmds::queries::query::build_query_endpoint;
+use crate::cmds::queries::query::execute_load;
 use crate::cmds::queries::query::execute_query_json;
 use crate::cmds::Config;
 use crate::cmds::Status;
@@ -116,34 +119,34 @@ impl LoadCommand {
             .arg(
                 Arg::new("profile")
                     .long("profile")
-                    .about("Profile to run queries")
+                    .help("Profile to run queries")
                     .required(false)
                     .possible_values(&["local"])
                     .default_value("local"),
             )
             .arg(
                 Arg::new("format").long("format")
-                    .about("the format of file, support csv")
+                    .help("the format of file, support csv")
                     .takes_value(true)
                     .required(false)
                     .default_value("csv"),
             )
             .arg(
                 Arg::new("schema").long("schema")
-                    .about("defined schema for table load, for example:\
+                    .help("defined schema for table load, for example:\
                     bendctl load --schema a:uint8, b:uint64, c:String")
                     .takes_value(true)
                     .required(false),
             )
             .arg(
                 Arg::new("load")
-                    .about("file to get loaded for example foo.csv")
+                    .help("file to get loaded for example foo.csv")
                     .takes_value(true)
                     .required(false),
             )
             .arg(
                 Arg::new("skip_header_lines").long("skip-header-lines")
-                    .about("state on whether CSV has dataset header for example: \
+                    .help("state on whether CSV has dataset header for example: \
                     bendctl load test.csv --with_header true would ignore the first ten lines in csv file")
                     .default_value("1")
                     .required(false)
@@ -151,7 +154,7 @@ impl LoadCommand {
             )
             .arg(
                 Arg::new("table").long("table")
-                .about("database table")
+                .help("database table")
                 .takes_value(true)
                 .required(true),
             );
@@ -161,11 +164,12 @@ impl LoadCommand {
     async fn local_exec_match(&self, writer: &mut Writer, args: &ArgMatches) -> Result<()> {
         match self.local_exec_precheck(args).await {
             Ok(_) => {
-                let mut reader = build_reader(args.value_of("load")).await;
-                let mut record = reader.records();
+                let location = args.value_of("load");
                 let table = args.value_of("table").unwrap();
+                let skip_header = args.value_of("skip_header_lines").unwrap_or("1");
                 let schema = args.value_of("schema");
-                let table_format = match schema {
+
+                let table_with_schema = match schema {
                     Some(_) => {
                         let schema: Schema =
                             args.value_of_t("schema").expect("cannot build schema");
@@ -177,78 +181,52 @@ impl LoadCommand {
                     }
                     None => table.to_string(),
                 };
-                let start = time::Instant::now();
-                let status = Status::read(self.conf.clone())?;
-                let (cli, url) = build_query_endpoint(&status)?;
-                let mut count = 0;
-                for _ in 0..args.value_of("skip_header_lines").unwrap().parse().unwrap() {
-                    record.next();
-                }
-                loop {
-                    let mut batch = vec![];
-                    // possible optimization is to run iterator in parallel
-                    for _ in 0..100_000 {
-                        if let Some(line) = record.next() {
-                            if let Ok(line) = line {
-                                batch.push(line);
-                                count += 1;
-                            } else {
-                                writer.write_err(format!(
-                                    "cannot read csv line {}, error: {}",
-                                    count,
-                                    line.unwrap_err()
-                                ))
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if batch.is_empty() {
-                        break;
-                    }
-                    let values: Vec<String> = batch
-                        .into_iter()
-                        .map(|s| {
-                            s.iter()
-                                .map(|i| {
-                                    if i.trim().is_empty() {
-                                        "null".to_string()
-                                    } else {
-                                        "'".to_owned() + i + &*"'".to_owned()
-                                    }
-                                })
-                                .join(",")
-                        })
-                        .map(|e| format!("({})", e.trim()))
-                        .filter(|e| !e.trim().is_empty())
-                        .collect();
-                    let values = values.join(",");
-                    let query = format!("INSERT INTO {} VALUES {}", table_format, values);
-                    if let Err(e) = execute_query_json(&cli, &url, query.clone()).await {
-                        writer.write_err(format!(
-                            "cannot insert data into {} with query {}, error: {:?}",
-                            table, query, e
-                        ))
-                    }
-                }
-                let elapsed = start.elapsed();
-                let time = elapsed.as_millis() as f64 / 1000f64;
-                writer.write_ok(format!(
-                    "successfully loaded {} lines, rows/src: {} (rows/sec). time: {} sec",
-                    count.to_formatted_string(&Locale::en),
-                    (count as f64 / time)
-                        .as_u128()
-                        .to_formatted_string(&Locale::en),
-                    time
-                ));
-
-                Ok(())
+                self.load(location, table_with_schema.as_str(), skip_header, writer)
+                    .await
             }
             Err(e) => {
-                writer.write_err(format!("Query command precheck failed, error {:?}", e));
+                writer.write_err(format!("Query command precheck failed, error {e:?}"));
                 Ok(())
             }
         }
+    }
+
+    pub async fn load(
+        &self,
+        location: Option<&str>,
+        table_with_schema: &str,
+        skip_header: &str,
+        writer: &mut Writer,
+    ) -> Result<()> {
+        let mut reader = build_reader(location).await;
+        let mut data = vec![];
+        reader.read_to_end(&mut data)?;
+
+        let start = time::Instant::now();
+        let status = Status::read(self.conf.clone())?;
+        let (cli, url) = build_load_endpoint(&status)?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "insert_sql",
+            format!("INSERT INTO {table_with_schema} format CSV")
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("csv_header", skip_header.to_string().parse().unwrap());
+        let progress = execute_load(&cli, &url, headers, data).await?;
+
+        let elapsed = start.elapsed();
+        let time = elapsed.as_millis() as f64 / 1000f64;
+        writer.write_ok(format!(
+            "successfully loaded {} rows, rows/src: {} (rows/sec). time: {} sec",
+            progress.read_rows.to_formatted_string(&Locale::en),
+            (progress.read_rows as f64 / time)
+                .as_u128()
+                .to_formatted_string(&Locale::en),
+            time
+        ));
+
+        Ok(())
     }
 
     /// precheck would at build up and validate schema for incoming INSERT operations
@@ -285,14 +263,12 @@ impl LoadCommand {
     }
 }
 
-async fn build_reader(load: Option<&str>) -> csv::Reader<Box<dyn std::io::Read + Send + Sync>> {
+pub async fn build_reader(load: Option<&str>) -> Box<dyn std::io::Read + Send + Sync> {
     match load {
         Some(val) => {
             if Path::new(val).exists() {
                 let f = std::fs::File::open(val).expect("cannot open file: permission denied");
-                csv::ReaderBuilder::new()
-                    .has_headers(false)
-                    .from_reader(Box::new(f))
+                Box::new(f)
             } else if val.contains("://") {
                 let target = reqwest::get(val)
                     .await
@@ -302,20 +278,14 @@ async fn build_reader(load: Option<&str>) -> csv::Reader<Box<dyn std::io::Read +
                     .text()
                     .await
                     .expect("cannot fetch for target"); // generate an error if server didn't respond
-                csv::ReaderBuilder::new()
-                    .has_headers(false)
-                    .from_reader(Box::new(Cursor::new(target)))
+                Box::new(Box::new(Cursor::new(target)))
             } else {
-                csv::ReaderBuilder::new()
-                    .has_headers(false)
-                    .from_reader(Box::new(Cursor::new(val.to_string().as_bytes().to_owned())))
+                Box::new(Cursor::new(val.to_string()))
             }
         }
         None => {
             let io = std::io::stdin();
-            csv::ReaderBuilder::new()
-                .has_headers(false)
-                .from_reader(Box::new(io))
+            Box::new(io)
         }
     }
 }
@@ -324,10 +294,10 @@ async fn table_exists(status: &Status, table: Option<&str>) -> Result<()> {
     match table {
         Some(t) => {
             let (cli, url) = build_query_endpoint(status)?;
-            let query = format!("SHOW TABLES LIKE '{}';", t);
+            let query = format!("SHOW TABLES LIKE '{t}';");
             let (col, data, _) = execute_query_json(&cli, &url, query).await?;
             if col.is_none() || data.is_empty() {
-                return Err(CliError::Unknown(format!("table {} not found", t)));
+                return Err(CliError::Unknown(format!("table {t} not found")));
             }
         }
         None => return Err(CliError::Unknown("no table found in argument".to_string())),

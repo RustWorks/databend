@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use common_exception::Result;
+use common_meta_types::UserGrantSet;
 use common_meta_types::UserInfo;
-use common_meta_types::UserPrivilege;
 use common_meta_types::UserQuota;
 use common_planners::CreateUserPlan;
 use common_streams::DataBlockStream;
@@ -28,39 +28,39 @@ use crate::interpreters::InterpreterPtr;
 use crate::sessions::QueryContext;
 
 #[derive(Debug)]
-pub struct CreatUserInterpreter {
+pub struct CreateUserInterpreter {
     ctx: Arc<QueryContext>,
     plan: CreateUserPlan,
 }
 
-impl CreatUserInterpreter {
+impl CreateUserInterpreter {
     pub fn try_create(ctx: Arc<QueryContext>, plan: CreateUserPlan) -> Result<InterpreterPtr> {
-        Ok(Arc::new(CreatUserInterpreter { ctx, plan }))
+        Ok(Arc::new(CreateUserInterpreter { ctx, plan }))
     }
 }
 
 #[async_trait::async_trait]
-impl Interpreter for CreatUserInterpreter {
+impl Interpreter for CreateUserInterpreter {
     fn name(&self) -> &str {
         "CreateUserInterpreter"
     }
 
-    #[tracing::instrument(level = "info", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, _input_stream), fields(ctx.id = self.ctx.get_id().as_str()))]
     async fn execute(
         &self,
         _input_stream: Option<SendableDataBlockStream>,
     ) -> Result<SendableDataBlockStream> {
         let plan = self.plan.clone();
-        let user_mgr = self.ctx.get_sessions_manager().get_user_manager();
+        let tenant = self.ctx.get_tenant();
+        let user_mgr = self.ctx.get_user_manager();
         let user_info = UserInfo {
+            auth_info: plan.auth_info.clone(),
             name: plan.name,
             hostname: plan.hostname,
-            password: plan.password,
-            auth_type: plan.auth_type,
-            privileges: UserPrivilege::empty(),
+            grants: UserGrantSet::empty(),
             quota: UserQuota::no_limit(),
         };
-        user_mgr.add_user(user_info).await?;
+        user_mgr.add_user(&tenant, user_info).await?;
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),

@@ -12,16 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use message::AdminRequest;
-pub use message::AdminRequestInner;
-pub use message::JoinRequest;
-pub use meta_service_impl::MetaServiceImpl;
-pub use network::Network;
+pub use common_meta_types::ForwardRequest;
+pub use common_meta_types::ForwardRequestBody;
+pub use common_meta_types::JoinRequest;
+pub use meta_service_impl::RaftServiceImpl;
 pub use raftmeta::MetaNode;
 
-mod message;
 pub mod meta_leader;
 mod meta_node_kv_api_impl;
 pub mod meta_service_impl;
-pub mod network;
 pub mod raftmeta;

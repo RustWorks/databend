@@ -30,11 +30,12 @@ use common_base::SignalStream;
 use common_base::SignalType;
 use common_exception::ErrorCode;
 use common_exception::Result;
-use common_flight_rpc::ConnectionFactory;
+use common_grpc::ConnectionFactory;
 use common_management::ClusterApi;
 use common_management::ClusterMgr;
 use common_meta_api::KVApi;
 use common_meta_types::NodeInfo;
+use common_tracing::tracing;
 use futures::future::select;
 use futures::future::Either;
 use futures::Future;
@@ -54,7 +55,7 @@ pub struct ClusterDiscovery {
 
 impl ClusterDiscovery {
     async fn create_meta_client(cfg: &Config) -> Result<Arc<dyn KVApi>> {
-        let meta_api_provider = MetaClientProvider::new(cfg.meta.to_flight_client_config());
+        let meta_api_provider = MetaClientProvider::new(cfg.meta.to_grpc_client_config());
         match meta_api_provider.try_get_kv_client().await {
             Ok(client) => Ok(client),
             Err(cause) => Err(cause.add_message_back("(while create cluster api).")),
@@ -81,7 +82,7 @@ impl ClusterDiscovery {
         let tenant_id = &cfg.query.tenant_id;
         let cluster_id = &cfg.query.cluster_id;
         let lift_time = Duration::from_secs(60);
-        let cluster_manager = ClusterMgr::new(api, tenant_id, cluster_id, lift_time)?;
+        let cluster_manager = ClusterMgr::create(api, tenant_id, cluster_id, lift_time)?;
 
         Ok((lift_time, Arc::new(cluster_manager)))
     }
@@ -115,7 +116,7 @@ impl ClusterDiscovery {
             if before_node.flight_address.eq(&node_info.flight_address) {
                 let drop_invalid_node = self.api_provider.drop_node(before_node.id, None);
                 if let Err(cause) = drop_invalid_node.await {
-                    log::warn!("Drop invalid node failure: {:?}", cause);
+                    tracing::warn!("Drop invalid node failure: {:?}", cause);
                 }
             }
         }
@@ -127,7 +128,7 @@ impl ClusterDiscovery {
         let mut heartbeat = self.heartbeat.lock().await;
 
         if let Err(shutdown_failure) = heartbeat.shutdown().await {
-            log::warn!(
+            tracing::warn!(
                 "Cannot shutdown cluster heartbeat, cause {:?}",
                 shutdown_failure
             );
@@ -139,7 +140,7 @@ impl ClusterDiscovery {
         match futures::future::select(drop_node, signal_future).await {
             Either::Left((drop_node_result, _)) => {
                 if let Err(drop_node_failure) = drop_node_result {
-                    log::warn!(
+                    tracing::warn!(
                         "Cannot drop cluster node(while shutdown), cause {:?}",
                         drop_node_failure
                     );
@@ -156,7 +157,7 @@ impl ClusterDiscovery {
 
     pub async fn register_to_metastore(self: &Arc<Self>, cfg: &Config) -> Result<()> {
         let cpus = cfg.query.num_cpus;
-        // TODO: 0.0.0.0 || ::0
+        // TODO: 127.0.0.1 || ::0
         let address = cfg.query.flight_api_address.clone();
         let node_info = NodeInfo::create(self.local_id.clone(), cpus, address);
 
@@ -208,14 +209,14 @@ impl Cluster {
             if node.id == name {
                 return match config.tls_query_cli_enabled() {
                     true => Ok(FlightClient::new(FlightServiceClient::new(
-                        ConnectionFactory::create_flight_channel(
+                        ConnectionFactory::create_rpc_channel(
                             node.flight_address.clone(),
                             None,
                             Some(config.tls_query_client_conf()),
                         )?,
                     ))),
                     false => Ok(FlightClient::new(FlightServiceClient::new(
-                        ConnectionFactory::create_flight_channel(
+                        ConnectionFactory::create_rpc_channel(
                             node.flight_address.clone(),
                             None,
                             None,
@@ -280,7 +281,7 @@ impl ClusterHeartbeat {
                         shutdown_notified = new_shutdown_notified;
                         let heartbeat = cluster_api.heartbeat(local_id.clone(), None);
                         if let Err(failure) = heartbeat.await {
-                            log::error!("Cluster cluster api heartbeat failure: {:?}", failure);
+                            tracing::error!("Cluster cluster api heartbeat failure: {:?}", failure);
                         }
                     }
                 }

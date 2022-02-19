@@ -29,8 +29,8 @@ use crate::types::SqlType;
 use crate::types::Value;
 use crate::types::ValueRef;
 
-pub(crate) struct TupleColumnData {
-    pub(crate) inner: Vec<ArcColumnData>,
+pub struct TupleColumnData {
+    pub inner: Vec<ArcColumnData>,
 }
 
 impl TupleColumnData {
@@ -72,8 +72,8 @@ impl ColumnData for TupleColumnData {
 
     fn push(&mut self, value: Value) {
         if let Value::Tuple(vs) = value {
-            vs.iter().zip(self.inner.iter_mut()).for_each(|(v, mut c)| {
-                let inner_column = Arc::get_mut(&mut c).unwrap();
+            vs.iter().zip(self.inner.iter_mut()).for_each(|(v, c)| {
+                let inner_column = Arc::get_mut(c).unwrap();
                 inner_column.push(v.clone());
             });
         } else {

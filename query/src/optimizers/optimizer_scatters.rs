@@ -177,7 +177,7 @@ impl ScattersOptimizerImpl {
     fn convergent_shuffle_stage_builder(input: Arc<PlanNode>) -> PlanBuilder {
         PlanBuilder::from(&PlanNode::Stage(StagePlan {
             kind: StageKind::Convergent,
-            scatters_expr: Expression::create_literal(DataValue::UInt64(Some(0))),
+            scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
             input,
         }))
     }
@@ -185,7 +185,7 @@ impl ScattersOptimizerImpl {
     fn convergent_shuffle_stage(input: PlanNode) -> Result<PlanNode> {
         Ok(PlanNode::Stage(StagePlan {
             kind: StageKind::Convergent,
-            scatters_expr: Expression::create_literal(DataValue::UInt64(Some(0))),
+            scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
             input: Arc::new(input),
         }))
     }
@@ -206,7 +206,7 @@ impl ScattersOptimizerImpl {
 
 impl PlanRewriter for ScattersOptimizerImpl {
     fn rewrite_subquery_plan(&mut self, subquery_plan: &PlanNode) -> Result<PlanNode> {
-        let subquery_ctx = QueryContext::new(self.ctx.clone());
+        let subquery_ctx = QueryContext::create_from(self.ctx.clone());
         let mut subquery_optimizer = ScattersOptimizerImpl::create(subquery_ctx);
         let rewritten_subquery = subquery_optimizer.rewrite_plan_node(subquery_plan)?;
 
@@ -315,7 +315,7 @@ impl Optimizer for ScattersOptimizer {
             RunningMode::Standalone => Ok(rewrite_plan),
             RunningMode::Cluster => Ok(PlanNode::Stage(StagePlan {
                 kind: StageKind::Convergent,
-                scatters_expr: Expression::create_literal(DataValue::UInt64(Some(0))),
+                scatters_expr: Expression::create_literal(DataValue::UInt64(0)),
                 input: Arc::new(rewrite_plan),
             })),
         }

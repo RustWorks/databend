@@ -18,22 +18,28 @@ use common_datavalues::DataSchemaRef;
 use common_meta_types::CreateTableReq;
 use common_meta_types::TableMeta;
 
+use crate::PlanNode;
+
 pub type TableOptions = HashMap<String, String>;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct CreateTablePlan {
     pub if_not_exists: bool,
+    pub tenant: String,
     pub db: String,
     /// The table name
     pub table: String,
 
     pub table_meta: TableMeta,
+
+    pub as_select: Option<Box<PlanNode>>,
 }
 
 impl From<CreateTablePlan> for CreateTableReq {
     fn from(p: CreateTablePlan) -> Self {
         CreateTableReq {
             if_not_exists: p.if_not_exists,
+            tenant: p.tenant,
             db: p.db,
             table: p.table,
             table_meta: p.table_meta,
@@ -52,5 +58,9 @@ impl CreateTablePlan {
 
     pub fn engine(&self) -> &str {
         &self.table_meta.engine
+    }
+
+    pub fn as_select(&self) -> &Option<Box<PlanNode>> {
+        &self.as_select
     }
 }

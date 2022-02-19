@@ -26,6 +26,9 @@ use common_exception::ErrorCode;
 use common_exception::Result;
 use common_exception::ToErrorCode;
 use common_infallible::RwLock;
+use common_tracing::tracing;
+use common_tracing::tracing::Instrument;
+use common_tracing::tracing::Span;
 use tokio_stream::StreamExt;
 
 use crate::api::rpc::flight_scatter::FlightScatter;
@@ -70,7 +73,11 @@ impl DatabendQueryFlightDispatcher {
         self.abort.load(Ordering::Relaxed)
     }
 
-    pub fn get_stream(&self, ticket: &StreamTicket) -> Result<mpsc::Receiver<Result<DataBlock>>> {
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub fn get_stream(
+        &self,
+        ticket: &StreamTicket,
+    ) -> Result<(mpsc::Receiver<Result<DataBlock>>, DataSchemaRef)> {
         let stage_name = format!("{}/{}", ticket.query_id, ticket.stage_id);
         if let Some(notify) = self.stages_notify.write().remove(&stage_name) {
             notify.notify_waiters();
@@ -78,11 +85,12 @@ impl DatabendQueryFlightDispatcher {
 
         let stream_name = format!("{}/{}", stage_name, ticket.stream);
         match self.streams.write().remove(&stream_name) {
-            Some(stream_info) => Ok(stream_info.rx),
+            Some(stream_info) => Ok((stream_info.rx, stream_info.schema)),
             None => Err(ErrorCode::NotFoundStream("Stream is not found")),
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(session.id = session.get_id().as_str()))]
     pub async fn broadcast_action(&self, session: SessionRef, action: FlightAction) -> Result<()> {
         let query_id = action.get_query_id();
         let stage_id = action.get_stage_id();
@@ -100,6 +108,7 @@ impl DatabendQueryFlightDispatcher {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(session.id = session.get_id().as_str()))]
     pub async fn shuffle_action(&self, session: SessionRef, action: FlightAction) -> Result<()> {
         let query_id = action.get_query_id();
         let stage_id = action.get_stage_id();
@@ -117,9 +126,10 @@ impl DatabendQueryFlightDispatcher {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(session.id = session.get_id().as_str()))]
     async fn one_sink_action(&self, session: SessionRef, action: &FlightAction) -> Result<()> {
-        let query_context = session.create_context().await?;
-        let action_context = QueryContext::new(query_context.clone());
+        let query_context = session.create_query_context().await?;
+        let action_context = QueryContext::create_from(query_context.clone());
         let pipeline_builder = PipelineBuilder::create(action_context.clone());
 
         let query_plan = action.get_plan();
@@ -138,30 +148,34 @@ impl DatabendQueryFlightDispatcher {
         let tx_ref = self.streams.read().get(&stream_name).map(|x| x.tx.clone());
         let tx = tx_ref.ok_or_else(|| ErrorCode::NotFoundStream("Not found stream"))?;
 
-        query_context.try_spawn(async move {
-            let _session = session;
-            wait_start(stage_name, stages_notify).await;
+        query_context.try_spawn(
+            async move {
+                let _session = session;
+                wait_start(stage_name, stages_notify).await;
 
-            match pipeline.execute().await {
-                Err(error) => {
-                    tx.send(Err(error)).await.ok();
-                }
-                Ok(mut abortable_stream) => {
-                    while let Some(item) = abortable_stream.next().await {
-                        if let Err(error) = tx.send(item).await {
-                            log::error!(
-                                "Cannot push data when run_action_without_scatters. {}",
-                                error
-                            );
-                            break;
+                match pipeline.execute().await {
+                    Err(error) => {
+                        tx.send(Err(error)).await.ok();
+                    }
+                    Ok(mut abortable_stream) => {
+                        while let Some(item) = abortable_stream.next().await {
+                            if let Err(error) = tx.send(item).await {
+                                tracing::error!(
+                                    "Cannot push data when run_action_without_scatters. {}",
+                                    error
+                                );
+                                break;
+                            }
                         }
                     }
-                }
-            };
-        })?;
+                };
+            }
+            .instrument(Span::current()),
+        )?;
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(session.id = session.get_id().as_str()))]
     async fn action_with_scatter<T>(
         &self,
         session: SessionRef,
@@ -170,8 +184,8 @@ impl DatabendQueryFlightDispatcher {
     where
         T: FlightScatter + Send + 'static,
     {
-        let query_context = session.create_context().await?;
-        let action_context = QueryContext::new(query_context.clone());
+        let query_context = session.create_query_context().await?;
+        let action_context = QueryContext::create_from(query_context.clone());
         let pipeline_builder = PipelineBuilder::create(action_context.clone());
 
         let query_plan = action.get_plan();
@@ -212,40 +226,43 @@ impl DatabendQueryFlightDispatcher {
             action.get_sinks().len(),
         )?;
 
-        query_context.try_spawn(async move {
-            let _session = session;
-            wait_start(stage_name, stages_notify).await;
+        query_context.try_spawn(
+            async move {
+                let _session = session;
+                wait_start(stage_name, stages_notify).await;
 
-            let sinks_tx_ref = &sinks_tx;
-            let forward_blocks = async move {
-                let mut abortable_stream = pipeline.execute().await?;
-                while let Some(item) = abortable_stream.next().await {
-                    let forward_blocks = flight_scatter.execute(&item?)?;
+                let sinks_tx_ref = &sinks_tx;
+                let forward_blocks = async move {
+                    let mut abortable_stream = pipeline.execute().await?;
+                    while let Some(item) = abortable_stream.next().await {
+                        let forward_blocks = flight_scatter.execute(&item?)?;
 
-                    assert_eq!(forward_blocks.len(), sinks_tx_ref.len());
+                        assert_eq!(forward_blocks.len(), sinks_tx_ref.len());
 
-                    for (index, forward_block) in forward_blocks.iter().enumerate() {
-                        let tx: &Sender<Result<DataBlock>> = &sinks_tx_ref[index];
-                        tx.send(Ok(forward_block.clone()))
-                            .await
-                            .map_err_to_code(ErrorCode::LogicalError, || {
-                                "Cannot push data when run_action"
-                            })?;
+                        for (index, forward_block) in forward_blocks.iter().enumerate() {
+                            let tx: &Sender<Result<DataBlock>> = &sinks_tx_ref[index];
+                            tx.send(Ok(forward_block.clone()))
+                                .await
+                                .map_err_to_code(ErrorCode::LogicalError, || {
+                                    "Cannot push data when run_action"
+                                })?;
+                        }
                     }
-                }
 
-                Result::Ok(())
-            };
+                    Result::Ok(())
+                };
 
-            if let Err(error) = forward_blocks.await {
-                for tx in &sinks_tx {
-                    if !tx.is_closed() {
-                        let send_error_message = tx.send(Err(error.clone()));
-                        let _ignore_send_error = send_error_message.await;
+                if let Err(error) = forward_blocks.await {
+                    for tx in &sinks_tx {
+                        if !tx.is_closed() {
+                            let send_error_message = tx.send(Err(error.clone()));
+                            let _ignore_send_error = send_error_message.await;
+                        }
                     }
                 }
             }
-        })?;
+            .instrument(Span::current()),
+        )?;
 
         Ok(())
     }

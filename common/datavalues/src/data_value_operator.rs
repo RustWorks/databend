@@ -44,6 +44,10 @@ pub enum DataValueComparisonOperator {
     NotEq,
     Like,
     NotLike,
+    Regexp,
+    NotRegexp,
+    RLike,
+    NotRLike,
 }
 
 impl std::fmt::Display for DataValueComparisonOperator {
@@ -57,28 +61,48 @@ impl std::fmt::Display for DataValueComparisonOperator {
             DataValueComparisonOperator::NotEq => "!=",
             DataValueComparisonOperator::Like => "LIKE",
             DataValueComparisonOperator::NotLike => "NOT LIKE",
+            DataValueComparisonOperator::Regexp => "REGEXP",
+            DataValueComparisonOperator::NotRegexp => "NOT REGEXP",
+            DataValueComparisonOperator::RLike => "RLIKE",
+            DataValueComparisonOperator::NotRLike => "NOT RLIKE",
         };
         write!(f, "{}", display)
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum DataValueArithmeticOperator {
+pub enum DataValueBinaryOperator {
     Plus,
     Minus,
     Mul,
     Div,
+    IntDiv,
     Modulo,
 }
 
-impl std::fmt::Display for DataValueArithmeticOperator {
+impl std::fmt::Display for DataValueBinaryOperator {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let display = match &self {
-            DataValueArithmeticOperator::Plus => "plus",
-            DataValueArithmeticOperator::Minus => "minus",
-            DataValueArithmeticOperator::Mul => "multiply",
-            DataValueArithmeticOperator::Div => "divide",
-            DataValueArithmeticOperator::Modulo => "modulo",
+            DataValueBinaryOperator::Plus => "plus",
+            DataValueBinaryOperator::Minus => "minus",
+            DataValueBinaryOperator::Mul => "multiply",
+            DataValueBinaryOperator::Div => "divide",
+            DataValueBinaryOperator::IntDiv => "div",
+            DataValueBinaryOperator::Modulo => "modulo",
+        };
+        write!(f, "{}", display)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum DataValueUnaryOperator {
+    Negate,
+}
+
+impl std::fmt::Display for DataValueUnaryOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let display = match &self {
+            DataValueUnaryOperator::Negate => "negate",
         };
         write!(f, "{}", display)
     }

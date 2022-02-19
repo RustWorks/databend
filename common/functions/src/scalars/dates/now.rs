@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::sync::Arc;
 
 use common_datavalues::chrono::DateTime;
 use common_datavalues::chrono::Utc;
@@ -46,18 +47,22 @@ impl Function for NowFunction {
         self.display_name.as_str()
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::DateTime32(None))
+    fn return_type(
+        &self,
+        _args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        Ok(DateTime32Type::arc(None))
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, _columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
+    fn eval(
+        &self,
+        _columns: &common_datavalues::ColumnsWithField,
+        input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
         let utc: DateTime<Utc> = Utc::now();
-        let value = DataValue::UInt32(Some((utc.timestamp_millis() / 1000) as u32));
-        Ok(DataColumn::Constant(value, input_rows))
+        let value = (utc.timestamp_millis() / 1000) as u32;
+        let column = Series::from_data(&[value as u32]);
+        Ok(Arc::new(ConstColumn::new(column, input_rows)))
     }
 }
 

@@ -13,48 +13,54 @@
 // limitations under the License.
 
 use std::collections::BTreeSet;
+use std::fmt::Debug;
 use std::sync::Arc;
 
-use async_raft::config::Config;
-use async_raft::Raft;
-use async_raft::RaftMetrics;
-use async_raft::SnapshotPolicy;
+use anyerror::AnyError;
 use common_base::tokio;
 use common_base::tokio::sync::watch;
 use common_base::tokio::sync::Mutex;
 use common_base::tokio::sync::RwLockReadGuard;
 use common_base::tokio::task::JoinHandle;
-use common_exception::prelude::ErrorCode;
-use common_exception::prelude::ToErrorCode;
 use common_meta_api::MetaApi;
 use common_meta_raft_store::config::RaftConfig;
-use common_meta_raft_store::state_machine::AppliedState;
 use common_meta_raft_store::state_machine::StateMachine;
 use common_meta_raft_store::state_machine::TableLookupKey;
 use common_meta_raft_store::state_machine::TableLookupValue;
+use common_meta_sled_store::openraft;
+use common_meta_types::protobuf::raft_service_client::RaftServiceClient;
+use common_meta_types::protobuf::raft_service_server::RaftServiceServer;
+use common_meta_types::AppliedState;
 use common_meta_types::Cmd;
+use common_meta_types::ConnectionError;
+use common_meta_types::ForwardRequest;
+use common_meta_types::ForwardResponse;
+use common_meta_types::ForwardToLeader;
 use common_meta_types::ListTableReq;
 use common_meta_types::LogEntry;
+use common_meta_types::MetaError;
+use common_meta_types::MetaNetworkError;
+use common_meta_types::MetaNetworkResult;
+use common_meta_types::MetaRaftError;
+use common_meta_types::MetaResult;
 use common_meta_types::Node;
 use common_meta_types::NodeId;
 use common_meta_types::SeqV;
 use common_meta_types::TableInfo;
 use common_meta_types::TableMeta;
+use common_meta_types::ToMetaError;
 use common_tracing::tracing;
 use common_tracing::tracing::Instrument;
+use openraft::Config;
+use openraft::Raft;
+use openraft::RaftMetrics;
+use openraft::SnapshotPolicy;
 
-use crate::errors::ConnectionError;
-use crate::errors::ForwardToLeader;
-use crate::errors::MetaError;
-use crate::meta_service::message::AdminRequest;
-use crate::meta_service::message::AdminResponse;
 use crate::meta_service::meta_leader::MetaLeader;
-use crate::meta_service::AdminRequestInner;
+use crate::meta_service::ForwardRequestBody;
 use crate::meta_service::JoinRequest;
-use crate::meta_service::MetaServiceImpl;
-use crate::meta_service::Network;
-use crate::proto::meta_service_client::MetaServiceClient;
-use crate::proto::meta_service_server::MetaServiceServer;
+use crate::meta_service::RaftServiceImpl;
+use crate::network::Network;
 use crate::store::MetaRaftStore;
 use crate::Opened;
 
@@ -63,13 +69,11 @@ pub type MetaRaft = Raft<LogEntry, AppliedState, Network, MetaRaftStore>;
 
 // MetaNode is the container of meta data related components and threads, such as storage, the raft node and a raft-state monitor.
 pub struct MetaNode {
-    // metrics subscribes raft state changes. The most important field is the leader node id, to which all write operations should be forward.
-    pub metrics_rx: watch::Receiver<RaftMetrics>,
     pub sto: Arc<MetaRaftStore>,
     pub raft: MetaRaft,
     pub running_tx: watch::Sender<()>,
     pub running_rx: watch::Receiver<()>,
-    pub join_handles: Mutex<Vec<JoinHandle<common_exception::Result<()>>>>,
+    pub join_handles: Mutex<Vec<JoinHandle<MetaResult<()>>>>,
 }
 
 impl Opened for MetaNode {
@@ -87,20 +91,20 @@ pub struct MetaNodeBuilder {
 }
 
 impl MetaNodeBuilder {
-    pub async fn build(mut self) -> common_exception::Result<Arc<MetaNode>> {
+    pub async fn build(mut self) -> MetaResult<Arc<MetaNode>> {
         let node_id = self
             .node_id
-            .ok_or_else(|| ErrorCode::InvalidConfig("node_id is not set"))?;
+            .ok_or_else(|| MetaError::InvalidConfig(String::from("node_id is not set")))?;
 
         let config = self
             .raft_config
             .take()
-            .ok_or_else(|| ErrorCode::InvalidConfig("config is not set"))?;
+            .ok_or_else(|| MetaError::InvalidConfig(String::from("config is not set")))?;
 
         let sto = self
             .sto
             .take()
-            .ok_or_else(|| ErrorCode::InvalidConfig("sto is not set"))?;
+            .ok_or_else(|| MetaError::InvalidConfig(String::from("sto is not set")))?;
 
         let net = Network::new(sto.clone());
 
@@ -110,7 +114,6 @@ impl MetaNodeBuilder {
         let (tx, rx) = watch::channel::<()>(());
 
         let mn = Arc::new(MetaNode {
-            metrics_rx: metrics_rx.clone(),
             sto: sto.clone(),
             raft,
             running_tx: tx,
@@ -135,18 +138,25 @@ impl MetaNodeBuilder {
         Ok(mn)
     }
 
+    #[must_use]
     pub fn node_id(mut self, node_id: NodeId) -> Self {
         self.node_id = Some(node_id);
         self
     }
+
+    #[must_use]
     pub fn sto(mut self, sto: Arc<MetaRaftStore>) -> Self {
         self.sto = Some(sto);
         self
     }
+
+    #[must_use]
     pub fn addr(mut self, a: String) -> Self {
         self.addr = Some(a);
         self
     }
+
+    #[must_use]
     pub fn monitor_metrics(mut self, b: bool) -> Self {
         self.monitor_metrics = b;
         self
@@ -171,29 +181,36 @@ impl MetaNode {
 
         let hb = config.heartbeat_interval;
 
-        Config::build("foo_cluster".into())
-            .heartbeat_interval(hb)
-            // Choose a rational value for election timeout.
-            .election_timeout_min(hb * 8)
-            .election_timeout_max(hb * 12)
-            .install_snapshot_timeout(config.install_snapshot_timeout)
-            .snapshot_policy(SnapshotPolicy::LogsSinceLast(
-                config.snapshot_logs_since_last,
-            ))
-            .validate()
-            .expect("building raft Config from databend-metasrv config")
+        Config {
+            cluster_name: "foo_cluster".to_string(),
+            heartbeat_interval: hb,
+            election_timeout_min: hb * 8,
+            election_timeout_max: hb * 12,
+            install_snapshot_timeout: config.install_snapshot_timeout,
+            snapshot_policy: SnapshotPolicy::LogsSinceLast(config.snapshot_logs_since_last),
+            max_applied_log_to_keep: config.max_applied_log_to_keep,
+            ..Default::default()
+        }
+        .validate()
+        .expect("building raft Config from databend-metasrv config")
     }
 
     /// Start the grpc service for raft communication and meta operation API.
     #[tracing::instrument(level = "info", skip(mn))]
-    pub async fn start_grpc(mn: Arc<MetaNode>, addr: &str) -> common_exception::Result<()> {
+    pub async fn start_grpc(mn: Arc<MetaNode>, addr: &str) -> MetaNetworkResult<()> {
         let mut rx = mn.running_rx.clone();
 
-        let meta_srv_impl = MetaServiceImpl::create(mn.clone());
-        let meta_srv = MetaServiceServer::new(meta_srv_impl);
+        let meta_srv_impl = RaftServiceImpl::create(mn.clone());
+        let meta_srv = RaftServiceServer::new(meta_srv_impl);
 
         let addr_str = addr.to_string();
-        let addr = addr.parse::<std::net::SocketAddr>()?;
+        let ret = addr.parse::<std::net::SocketAddr>();
+        let addr = match ret {
+            Ok(addr) => addr,
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
         let node_id = mn.sto.id;
 
         let srv = tonic::transport::Server::builder().add_service(meta_srv);
@@ -208,9 +225,9 @@ impl MetaNode {
                 );
             })
             .await
-            .map_err_to_code(ErrorCode::MetaServiceError, || "fail to serve")?;
+            .map_error_to_meta_error(MetaError::MetaServiceError, || "fail to serve")?;
 
-            Ok::<(), common_exception::ErrorCode>(())
+            Ok::<(), MetaError>(())
         });
 
         let mut jh = mn.join_handles.lock().await;
@@ -231,7 +248,7 @@ impl MetaNode {
         open: Option<()>,
         create: Option<()>,
         init_cluster: Option<Vec<String>>,
-    ) -> common_exception::Result<Arc<MetaNode>> {
+    ) -> MetaResult<Arc<MetaNode>> {
         let mut config = config.clone();
 
         // Always disable fsync on mac.
@@ -254,7 +271,12 @@ impl MetaNode {
             builder = builder.node_id(sto.id);
         } else {
             // read id from config, read listening addr from config.
-            builder = builder.node_id(config.id).addr(config.raft_api_addr());
+            builder = builder.node_id(config.id).addr(
+                config
+                    .raft_api_addr()
+                    .await
+                    .map_err(|e| MetaError::Fatal(AnyError::new(&e)))?,
+            );
         }
 
         let mn = builder.build().await?;
@@ -263,15 +285,20 @@ impl MetaNode {
 
         if !is_open {
             if let Some(_addrs) = init_cluster {
-                mn.init_cluster(config.raft_api_addr()).await?;
+                mn.init_cluster(
+                    config
+                        .raft_api_addr()
+                        .await
+                        .map_err(|e| MetaError::Fatal(AnyError::new(&e)))?,
+                )
+                .await?;
             }
         }
-
         Ok(mn)
     }
 
     #[tracing::instrument(level = "info", skip(self))]
-    pub async fn stop(&self) -> common_exception::Result<i32> {
+    pub async fn stop(&self) -> MetaResult<i32> {
         // TODO(xp): need to be reentrant.
 
         let mut rx = self.raft.metrics();
@@ -279,7 +306,8 @@ impl MetaNode {
         self.raft
             .shutdown()
             .await
-            .map_err_to_code(ErrorCode::MetaServiceError, || "fail to stop raft")?;
+            .map_error_to_meta_error(MetaError::MetaServiceError, || "fail to stop raft")?;
+        // safe unwrap: receiver wait for change.
         self.running_tx.send(()).unwrap();
 
         // wait for raft to close the metrics tx
@@ -297,7 +325,7 @@ impl MetaNode {
         for j in self.join_handles.lock().await.iter_mut() {
             let _rst = j
                 .await
-                .map_err_to_code(ErrorCode::MetaServiceError, || "fail to join")?;
+                .map_error_to_meta_error(MetaError::MetaServiceError, || "fail to join")?;
             joined += 1;
         }
 
@@ -324,7 +352,7 @@ impl MetaNode {
                     loop {
                         let changed = tokio::select! {
                             _ = running_rx.changed() => {
-                               return Ok::<(), common_exception::ErrorCode>(());
+                               return Ok::<(), MetaError>(());
                             }
                             changed = metrics_rx.changed() => {
                                 changed
@@ -352,7 +380,7 @@ impl MetaNode {
                         }
                     }
 
-                    Ok::<(), common_exception::ErrorCode>(())
+                    Ok::<(), MetaError>(())
                 }
             }
             .instrument(span),
@@ -363,46 +391,55 @@ impl MetaNode {
     /// Start MetaNode in either `boot`, `single`, `join` or `open` mode,
     /// according to config.
     #[tracing::instrument(level = "info", skip(config))]
-    pub async fn start(config: &RaftConfig) -> Result<Arc<MetaNode>, ErrorCode> {
+    pub async fn start(config: &RaftConfig) -> Result<Arc<MetaNode>, MetaError> {
         tracing::info!(?config, "start()");
         let mn = Self::do_start(config).await?;
         tracing::info!("Done starting MetaNode: {:?}", config);
         Ok(mn)
     }
 
-    async fn do_start(conf: &RaftConfig) -> Result<Arc<MetaNode>, ErrorCode> {
-        // TODO(xp): remove boot mode
-        if conf.boot {
-            let mn = Self::open_create_boot(conf, None, Some(()), Some(vec![])).await?;
-            return Ok(mn);
-        }
-
+    async fn do_start(conf: &RaftConfig) -> Result<Arc<MetaNode>, MetaError> {
         if conf.single {
             let mn = MetaNode::open_create_boot(conf, Some(()), Some(()), Some(vec![])).await?;
             return Ok(mn);
         }
 
         if !conf.join.is_empty() {
-            // Bring up a new node, join an cluster
+            // Bring up a new node, join it into a cluster
             let mn = MetaNode::open_create_boot(conf, Some(()), Some(()), None).await?;
 
-            let addrs = &conf.join;
-            for addr in addrs {
-                let mut client = MetaServiceClient::connect(format!("http://{}", addr))
-                    .await
-                    .map_err(|e| ErrorCode::CannotConnectNode(e.to_string()))?;
+            if mn.is_opened() {
+                return Ok(mn);
+            }
 
-                let admin_req = AdminRequest {
-                    forward_to_leader: true,
-                    req: AdminRequestInner::Join(JoinRequest {
+            // Try to join a cluster only when this node is just created.
+            // Joining a node with log has risk messing up the data in this node and in the target cluster.
+
+            let addrs = &conf.join;
+            // Join cluster use advertise host instead of listen host
+            let raft_advertise_host = conf.raft_api_advertise_host_string();
+            #[allow(clippy::never_loop)]
+            for addr in addrs {
+                let mut client = RaftServiceClient::connect(format!("http://{}", addr))
+                    .await
+                    .map_err(|e| {
+                        MetaNetworkError::ConnectionError(ConnectionError::new(
+                            e,
+                            format!("while connect to {}", addr),
+                        ))
+                    })?;
+
+                let admin_req = ForwardRequest {
+                    forward_to_leader: 1,
+                    body: ForwardRequestBody::Join(JoinRequest {
                         node_id: conf.id,
-                        address: conf.raft_api_addr(),
+                        address: raft_advertise_host,
                     }),
                 };
 
                 let _res = client.forward(admin_req.clone()).await?;
                 // TODO: retry
-                // break;
+                break;
             }
 
             return Ok(mn);
@@ -416,7 +453,7 @@ impl MetaNode {
     /// Boot up the first node to create a cluster.
     /// For every cluster this func should be called exactly once.
     #[tracing::instrument(level = "info", skip(config), fields(config_id=config.config_id.as_str()))]
-    pub async fn boot(config: &RaftConfig) -> common_exception::Result<Arc<MetaNode>> {
+    pub async fn boot(config: &RaftConfig) -> MetaResult<Arc<MetaNode>> {
         // 1. Bring a node up as non voter, start the grpc service for raft communication.
         // 2. Initialize itself as leader, because it is the only one in the new cluster.
         // 3. Add itself to the cluster storage by committing an `add-node` log so that the cluster members(only this node) is persisted.
@@ -430,7 +467,7 @@ impl MetaNode {
     // - Initializing raft membership.
     // - Adding current node into the meta data.
     #[tracing::instrument(level = "info", skip(self))]
-    pub async fn init_cluster(&self, addr: String) -> common_exception::Result<()> {
+    pub async fn init_cluster(&self, addr: String) -> MetaResult<()> {
         let node_id = self.sto.id;
 
         let mut cluster_node_ids = BTreeSet::new();
@@ -440,7 +477,7 @@ impl MetaNode {
             .raft
             .initialize(cluster_node_ids)
             .await
-            .map_err(|x| ErrorCode::MetaServiceError(format!("{:?}", x)))?;
+            .map_err(|x| MetaError::MetaServiceError(format!("{:?}", x)))?;
 
         tracing::info!("initialized cluster, rst: {:?}", rst);
 
@@ -450,14 +487,14 @@ impl MetaNode {
     }
 
     /// When a leader is established, it is the leader's responsibility to setup replication from itself to non-voters, AKA learners.
-    /// async-raft does not persist the node set of non-voters, thus we need to do it manually.
+    /// openraft does not persist the node set of non-voters, thus we need to do it manually.
     /// This fn should be called once a node found it becomes leader.
     #[tracing::instrument(level = "info", skip(self))]
-    pub async fn add_configured_non_voters(&self) -> common_exception::Result<()> {
+    pub async fn add_configured_non_voters(&self) -> MetaResult<()> {
         // TODO after leader established, add non-voter through apis
         let node_ids = self.sto.list_non_voters().await;
         for i in node_ids.iter() {
-            let x = self.raft.add_non_voter(*i).await;
+            let x = self.raft.add_learner(*i, true).await;
 
             tracing::info!("add_non_voter result: {:?}", x);
             if x.is_ok() {
@@ -470,7 +507,7 @@ impl MetaNode {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn get_node(&self, node_id: &NodeId) -> common_exception::Result<Option<Node>> {
+    pub async fn get_node(&self, node_id: &NodeId) -> MetaResult<Option<Node>> {
         // inconsistent get: from local state machine
 
         let sm = self.sto.state_machine.read().await;
@@ -478,13 +515,58 @@ impl MetaNode {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn handle_admin_req(&self, req: AdminRequest) -> Result<AdminResponse, MetaError> {
+    pub async fn get_nodes(&self) -> MetaResult<Vec<Node>> {
+        // inconsistent get: from local state machine
+        let sm = self.sto.state_machine.read().await;
+        sm.get_nodes()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn get_voters(&self) -> MetaResult<Vec<Node>> {
+        // inconsistent get: from local state machine
+        self.sto.get_voters().await
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn get_non_voters(&self) -> MetaResult<Vec<Node>> {
+        // inconsistent get: from local state machine
+        self.sto.get_non_voters().await
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn consistent_read<Request, Reply>(&self, req: Request) -> Result<Reply, MetaError>
+    where
+        Request: Into<ForwardRequestBody> + Debug,
+        ForwardResponse: TryInto<Reply>,
+        <ForwardResponse as TryInto<Reply>>::Error: std::fmt::Display,
+    {
+        let res = self
+            .handle_forwardable_request(ForwardRequest {
+                forward_to_leader: 1,
+                body: req.into(),
+            })
+            .await?;
+
+        let res: Reply = res.try_into().map_err(|e| {
+            MetaRaftError::ConsistentReadError(format!("consistent read recv invalid reply: {}", e))
+        })?;
+
+        Ok(res)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, req), fields(target=%req.forward_to_leader))]
+    pub async fn handle_forwardable_request(
+        &self,
+        req: ForwardRequest,
+    ) -> Result<ForwardResponse, MetaError> {
+        tracing::debug!("handle_forwardable_request: {:?}", req);
+
         let forward = req.forward_to_leader;
 
         let l = self.as_leader().await;
         let res = match l {
-            Ok(l) => l.handle_admin_req(req.clone()).await,
-            Err(e) => Err(MetaError::ForwardToLeader(e)),
+            Ok(l) => l.handle_forwardable_req(req.clone()).await,
+            Err(e) => Err(MetaRaftError::ForwardToLeader(e).into()),
         };
 
         let e = match res {
@@ -493,21 +575,29 @@ impl MetaNode {
         };
 
         let e = match e {
-            MetaError::ForwardToLeader(e) => e,
+            MetaError::MetaRaftError(err) => match err {
+                MetaRaftError::ForwardToLeader(err) => err,
+                _ => return Err(err.into()),
+            },
             _ => return Err(e),
         };
 
-        if !forward {
-            return Err(MetaError::ForwardToLeader(e));
+        if forward == 0 {
+            return Err(MetaRaftError::RequestNotForwardToLeaderError(
+                "req not forward to leader".to_string(),
+            )
+            .into());
         }
 
-        let leader_id = e.leader.ok_or(MetaError::ForwardToLeader(e))?;
+        let leader_id = e.leader_id.ok_or_else(|| {
+            MetaRaftError::NoLeaderError("need to forward req but no leader".to_string())
+        })?;
 
         let mut r2 = req.clone();
         // Avoid infinite forward
-        r2.set_forward(false);
+        r2.decr_forward();
 
-        let res: AdminResponse = self.forward(&leader_id, r2).await?;
+        let res: ForwardResponse = self.forward(&leader_id, r2).await?;
 
         Ok(res)
     }
@@ -522,18 +612,14 @@ impl MetaNode {
             return Ok(MetaLeader::new(self));
         }
         Err(ForwardToLeader {
-            leader: Some(curr_leader),
+            leader_id: Some(curr_leader),
         })
     }
 
     /// Add a new node into this cluster.
     /// The node info is committed with raft, thus it must be called on an initialized node.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn add_node(
-        &self,
-        node_id: NodeId,
-        addr: String,
-    ) -> common_exception::Result<AppliedState> {
+    pub async fn add_node(&self, node_id: NodeId, addr: String) -> Result<AppliedState, MetaError> {
         // TODO: use txid?
         let resp = self
             .write(LogEntry {
@@ -559,20 +645,23 @@ impl MetaNode {
         &self,
         db_id: u64,
         name: &str,
-    ) -> Result<Option<SeqV<TableLookupValue>>, ErrorCode> {
+    ) -> Result<Option<SeqV<TableLookupValue>>, MetaError> {
         // inconsistent get: from local state machine
 
         let sm = self.sto.state_machine.read().await;
-        sm.table_lookup().get(
+        match sm.table_lookup().get(
             &(TableLookupKey {
                 database_id: db_id,
                 table_name: name.to_string(),
             }),
-        )
+        ) {
+            Ok(e) => Ok(e),
+            Err(e) => Err(e.into()),
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn list_tables(&self, req: ListTableReq) -> Result<Vec<Arc<TableInfo>>, ErrorCode> {
+    pub async fn list_tables(&self, req: ListTableReq) -> Result<Vec<Arc<TableInfo>>, MetaError> {
         // inconsistent get: from local state machine
 
         let sm = self.sto.state_machine.read().await;
@@ -580,7 +669,7 @@ impl MetaNode {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn get_table_by_id(&self, tid: &u64) -> Result<Option<SeqV<TableMeta>>, ErrorCode> {
+    pub async fn get_table_by_id(&self, tid: &u64) -> Result<Option<SeqV<TableMeta>>, MetaError> {
         // inconsistent get: from local state machine
 
         let sm = self.sto.state_machine.read().await;
@@ -588,12 +677,14 @@ impl MetaNode {
     }
 
     /// Submit a write request to the known leader. Returns the response after applying the request.
-    #[tracing::instrument(level = "info", skip(self))]
-    pub async fn write(&self, req: LogEntry) -> common_exception::Result<AppliedState> {
+    #[tracing::instrument(level = "info", skip(self, req))]
+    pub async fn write(&self, req: LogEntry) -> Result<AppliedState, MetaError> {
+        tracing::debug!("req: {:?}", req);
+
         let res = self
-            .handle_admin_req(AdminRequest {
-                forward_to_leader: true,
-                req: AdminRequestInner::Write(req.clone()),
+            .handle_forwardable_request(ForwardRequest {
+                forward_to_leader: 1,
+                body: ForwardRequestBody::Write(req.clone()),
             })
             .await?;
 
@@ -608,7 +699,7 @@ impl MetaNode {
     pub async fn get_leader(&self) -> NodeId {
         // fast path: there is a known leader
 
-        if let Some(l) = self.metrics_rx.borrow().current_leader {
+        if let Some(l) = self.raft.metrics().borrow().current_leader {
             return l;
         }
 
@@ -616,7 +707,7 @@ impl MetaNode {
 
         // Need to clone before calling changed() on it.
         // Otherwise other thread waiting on changed() may not receive the change event.
-        let mut rx = self.metrics_rx.clone();
+        let mut rx = self.raft.metrics();
 
         loop {
             // NOTE:
@@ -638,25 +729,30 @@ impl MetaNode {
     pub async fn forward(
         &self,
         node_id: &NodeId,
-        req: AdminRequest,
-    ) -> Result<AdminResponse, MetaError> {
+        req: ForwardRequest,
+    ) -> Result<ForwardResponse, MetaError> {
         let addr = self
             .sto
             .get_node_addr(node_id)
             .await
-            .map_err(|e| MetaError::UnknownError(e.to_string()))?;
+            .map_err(|e| MetaNetworkError::GetNodeAddrError(e.to_string()))?;
 
-        let mut client = MetaServiceClient::connect(format!("http://{}", addr))
+        let mut client = RaftServiceClient::connect(format!("http://{}", addr))
             .await
-            .map_err(|e| ConnectionError::new(e, format!("address: {}", addr)))?;
+            .map_err(|e| {
+                MetaNetworkError::ConnectionError(ConnectionError::new(
+                    e,
+                    format!("address: {}", addr),
+                ))
+            })?;
 
         let resp = client
             .forward(req)
             .await
-            .map_err(|e| MetaError::UnknownError(e.to_string()))?;
+            .map_err(|e| MetaRaftError::ForwardRequestError(e.to_string()))?;
         let raft_mes = resp.into_inner();
 
-        let res: Result<AdminResponse, MetaError> = raft_mes.into();
+        let res: Result<ForwardResponse, MetaError> = raft_mes.into();
         res
     }
 }

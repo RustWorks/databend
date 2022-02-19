@@ -14,16 +14,13 @@
 
 use std::fmt;
 
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
 use common_datavalues::DataValue;
+use common_datavalues::StringType;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct ToTypeNameFunction {
@@ -39,7 +36,7 @@ impl ToTypeNameFunction {
 
     pub fn desc() -> FunctionDescription {
         FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic())
+            .features(FunctionFeatures::default().deterministic().num_arguments(1))
     }
 }
 
@@ -48,24 +45,22 @@ impl Function for ToTypeNameFunction {
         "ToTypeNameFunction"
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
-        Ok(DataType::String)
+    fn return_type(
+        &self,
+        _args: &[&common_datavalues::DataTypePtr],
+    ) -> Result<common_datavalues::DataTypePtr> {
+        Ok(StringType::arc())
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
-        let type_name = format!("{}", columns[0].data_type());
-        Ok(DataColumn::Constant(
-            DataValue::String(Some(type_name.into_bytes())),
-            input_rows,
-        ))
-    }
-
-    fn num_arguments(&self) -> usize {
-        1
+    fn eval(
+        &self,
+        columns: &common_datavalues::ColumnsWithField,
+        input_rows: usize,
+    ) -> Result<common_datavalues::ColumnRef> {
+        let type_name = format!("{:?}", columns[0].data_type());
+        let value = DataValue::String(type_name.as_bytes().to_vec());
+        let data_type = StringType::arc();
+        value.as_const_column(&data_type, input_rows)
     }
 }
 

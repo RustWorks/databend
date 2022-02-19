@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_datavalues::prelude::ToDataType;
 use common_datavalues::DataValue;
 use common_exception::Result;
 use common_planners::AggregatorFinalPlan;
@@ -24,9 +25,9 @@ use common_planners::PlanBuilder;
 use common_planners::PlanNode;
 use common_planners::PlanRewriter;
 
-use crate::catalogs::ToReadDataSourcePlan;
 use crate::optimizers::Optimizer;
 use crate::sessions::QueryContext;
+use crate::storages::ToReadDataSourcePlan;
 
 struct StatisticsExactImpl<'a> {
     ctx: &'a Arc<QueryContext>,
@@ -65,9 +66,10 @@ impl PlanRewriter for StatisticsExactImpl<'_> {
                         let source_plan = table.read_plan(self.ctx.clone(), None).await?;
                         let dummy_read_plan = PlanNode::ReadSource(source_plan);
 
-                        let expr = Expression::create_literal(DataValue::UInt64(Some(
-                            read_source_plan.statistics.read_rows as u64,
-                        )));
+                        let expr = Expression::create_literal_with_type(
+                            DataValue::UInt64(read_source_plan.statistics.read_rows as u64),
+                            u64::to_data_type(),
+                        );
 
                         self.rewritten = true;
                         let alias_name = plan.aggr_expr[0].column_name();

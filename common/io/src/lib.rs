@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// https://github.com/rust-lang/rust-clippy/issues/8334
+#![allow(clippy::ptr_arg)]
+
 pub mod prelude;
 
-mod binary_de;
 mod binary_read;
-mod binary_ser;
 mod binary_write;
 mod buf_read;
 mod marshal;
+mod options_deserializer;
 mod stat_buffer;
 mod unmarshal;
 mod utils;

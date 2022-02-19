@@ -16,115 +16,52 @@ use common_datavalues::prelude::*;
 use common_exception::Result;
 use common_functions::scalars::*;
 
+use crate::scalars::scalar_function2_test::test_scalar_functions;
+use crate::scalars::scalar_function2_test::ScalarFunctionTest;
+
 #[test]
 fn test_pow_function() -> Result<()> {
-    #[allow(dead_code)]
-    struct Test {
-        name: &'static str,
-        display: &'static str,
-        args: Vec<DataColumnWithField>,
-        expect: DataColumn,
-        error: &'static str,
-    }
     let tests = vec![
-        Test {
+        ScalarFunctionTest {
             name: "pow-with-literal",
-            display: "POW",
-            args: vec![
-                DataColumnWithField::new(
-                    Series::new([2]).into(),
-                    DataField::new("x", DataType::Int32, false),
-                ),
-                DataColumnWithField::new(
-                    Series::new([2]).into(),
-                    DataField::new("y", DataType::Int32, false),
-                ),
-            ],
-            expect: DataColumn::Constant(4_f64.into(), 1),
+            columns: vec![Series::from_data([2]), Series::from_data([2])],
+            expect: Series::from_data(vec![4_f64]),
             error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "pow-with-series",
-            display: "POW",
-            args: vec![
-                DataColumnWithField::new(
-                    Series::new([2, 2]).into(),
-                    DataField::new("x", DataType::Int32, false),
-                ),
-                DataColumnWithField::new(
-                    Series::new([2, -2]).into(),
-                    DataField::new("y", DataType::Int32, false),
-                ),
-            ],
-            expect: Series::new([4_f64, 0.25]).into(),
+            columns: vec![Series::from_data([2, 2]), Series::from_data([2, -2])],
+            expect: Series::from_data([4_f64, 0.25]),
             error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "pow-with-null",
-            display: "POW",
-            args: vec![
-                DataColumnWithField::new(
-                    Series::new([Some(2), None, None]).into(),
-                    DataField::new("x", DataType::Int32, false),
-                ),
-                DataColumnWithField::new(
-                    Series::new([Some(2), Some(-2), None]).into(),
-                    DataField::new("y", DataType::Int32, false),
-                ),
+            columns: vec![
+                Series::from_data([Some(2), None, None]),
+                Series::from_data([Some(2), Some(-2), None]),
             ],
-            expect: Series::new([Some(4_f64), None, None]).into(),
+            expect: Series::from_data([Some(4_f64), None, None]),
             error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "pow-x-constant",
-            display: "POW",
-            args: vec![
-                DataColumnWithField::new(
-                    DataColumn::Constant(2.into(), 2),
-                    DataField::new("x", DataType::Int32, false),
-                ),
-                DataColumnWithField::new(
-                    Series::new([Some(2), Some(-2), None]).into(),
-                    DataField::new("y", DataType::Int32, false),
-                ),
+            columns: vec![
+                ConstColumn::new(Series::from_data(vec![2]), 3).arc(),
+                Series::from_data([Some(2), Some(-2), None]),
             ],
-            expect: Series::new([Some(4_f64), Some(0.25), None]).into(),
+            expect: Series::from_data([Some(4_f64), Some(0.25), None]),
             error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "pow-y-constant",
-            display: "POW",
-            args: vec![
-                DataColumnWithField::new(
-                    Series::new([Some(2), Some(-2), None]).into(),
-                    DataField::new("x", DataType::Int32, false),
-                ),
-                DataColumnWithField::new(
-                    DataColumn::Constant(2.into(), 2),
-                    DataField::new("y", DataType::Int32, false),
-                ),
+            columns: vec![
+                Series::from_data([Some(2), Some(-2), None]),
+                ConstColumn::new(Series::from_data(vec![2]), 3).arc(),
             ],
-            expect: Series::new([Some(4_f64), Some(4.0), None]).into(),
+            expect: Series::from_data([Some(4_f64), Some(4.0), None]),
             error: "",
         },
     ];
-    let func = PowFunction::try_create("pow")?;
-    for t in tests {
-        if let Err(e) = func.eval(&t.args, t.args[0].column().len()) {
-            assert_eq!(t.error, e.to_string(), "{}", t.name);
-        }
 
-        // Display check.
-        let expect_display = t.display.to_string();
-        let actual_display = format!("{}", func);
-        assert_eq!(expect_display, actual_display);
-
-        let v = &(func.eval(&t.args, t.args[0].column().len())?);
-        assert_eq!(v, &t.expect, "{}", t.name);
-
-        let return_type = v.data_type();
-        let expected_type = func.return_type(&[t.args[0].column().data_type()])?;
-        assert_eq!(expected_type, return_type);
-    }
-    Ok(())
+    test_scalar_functions(PowFunction::try_create("pow")?, &tests)
 }

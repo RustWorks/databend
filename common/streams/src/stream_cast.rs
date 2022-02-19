@@ -16,8 +16,7 @@ use std::task::Context;
 use std::task::Poll;
 
 use common_datablocks::DataBlock;
-use common_datavalues::prelude::DataColumnWithField;
-use common_datavalues::DataSchemaRef;
+use common_datavalues::prelude::*;
 use common_exception::Result;
 use common_functions::scalars::Function;
 use futures::Stream;
@@ -53,7 +52,7 @@ impl CastStream {
             .zip(data_block.columns());
         let mut columns = Vec::with_capacity(data_block.num_columns());
         for ((cast_func, input_field), column) in iter {
-            let column = DataColumnWithField::new(column.clone(), input_field.clone());
+            let column = ColumnWithField::new(column.clone(), input_field.clone());
             columns.push(cast_func.eval(&[column], rows)?);
         }
 

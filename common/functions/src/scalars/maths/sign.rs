@@ -1,4 +1,4 @@
-// Copyright 2020 Datafuse Lfloor.
+// Copyright 2021 Datafuse Labs.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,18 +14,20 @@
 
 use std::fmt;
 use std::str;
+use std::sync::Arc;
 
-use common_datavalues::prelude::ArrayApply;
-use common_datavalues::prelude::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
-use common_exception::ErrorCode;
+use common_datavalues::prelude::*;
+use common_datavalues::with_match_primitive_type_id;
+use common_datavalues::ColumnWithField;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
+use crate::scalars::function_common::assert_numeric;
 use crate::scalars::function_factory::FunctionFeatures;
+use crate::scalars::EvalContext;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
+use crate::scalars::Monotonicity;
+use crate::scalars::ScalarUnaryExpression;
 
 #[derive(Clone)]
 pub struct SignFunction {
@@ -40,8 +42,21 @@ impl SignFunction {
     }
 
     pub fn desc() -> FunctionDescription {
-        FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic().monotonicity())
+        FunctionDescription::creator(Box::new(Self::try_create)).features(
+            FunctionFeatures::default()
+                .deterministic()
+                .monotonicity()
+                .num_arguments(1),
+        )
+    }
+}
+
+fn sign<S>(value: S, _ctx: &mut EvalContext) -> i8
+where S: Scalar + Default + PartialOrd {
+    match value.partial_cmp(&S::default()) {
+        Some(std::cmp::Ordering::Greater) => 1,
+        Some(std::cmp::Ordering::Less) => -1,
+        _ => 0,
     }
 }
 
@@ -50,56 +65,45 @@ impl Function for SignFunction {
         &*self.display_name
     }
 
-    fn num_arguments(&self) -> usize {
-        1
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        assert_numeric(args[0])?;
+        Ok(i8::to_data_type())
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if matches!(
-            args[0],
-            DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::UInt64
-                | DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::String
-                | DataType::Null
-        ) {
-            Ok(DataType::Int8)
-        } else {
-            Err(ErrorCode::IllegalDataType(format!(
-                "Expected numeric types, but got {}",
-                args[0]
-            )))
+    fn eval(&self, columns: &ColumnsWithField, _input_rows: usize) -> Result<ColumnRef> {
+        let mut ctx = EvalContext::default();
+        with_match_primitive_type_id!(columns[0].data_type().data_type_id(), |$S| {
+            let unary = ScalarUnaryExpression::<$S, i8, _>::new(sign::<$S>);
+            let col = unary.eval(columns[0].column(), &mut ctx)?;
+            Ok(Arc::new(col))
+        },{
+            unreachable!()
+        })
+    }
+
+    fn get_monotonicity(&self, args: &[Monotonicity]) -> Result<Monotonicity> {
+        let mono = args[0].clone();
+        if mono.is_constant {
+            return Ok(Monotonicity::create_constant());
         }
-    }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
+        // check whether the left/right boundary is numeric or not.
+        let is_boundary_numeric = |boundary: Option<ColumnWithField>| -> bool {
+            if let Some(column_field) = boundary {
+                column_field.data_type().data_type_id().is_numeric()
+            } else {
+                false
+            }
+        };
 
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        let result = columns[0]
-            .column()
-            .to_minimal_array()?
-            .cast_with_type(&DataType::Float64)?
-            .f64()?
-            .apply_cast_numeric(|v| {
-                if v > 0_f64 {
-                    1_i8
-                } else if v < 0_f64 {
-                    -1_i8
-                } else {
-                    0_i8
-                }
-            });
-        let column: DataColumn = result.into();
-        Ok(column)
+        // sign operator is monotonically non-decreasing for numeric values. However,'String' input is an exception.
+        // For example, query like "SELECT sign('-1'), sign('+1'), '-1' >= '+1';" returns -1, 1, 1(true),
+        // which is not monotonically increasing.
+        if is_boundary_numeric(mono.left) || is_boundary_numeric(mono.right) {
+            return Ok(Monotonicity::clone_without_range(&args[0]));
+        }
+
+        Ok(Monotonicity::default())
     }
 }
 

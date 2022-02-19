@@ -22,7 +22,7 @@ use common_planners::ExplainType;
 use common_streams::DataBlockStream;
 use common_streams::SendableDataBlockStream;
 
-use crate::interpreters::utils::apply_plan_rewrite;
+use crate::interpreters::plan_schedulers;
 use crate::interpreters::Interpreter;
 use crate::interpreters::InterpreterPtr;
 use crate::optimizers::Optimizers;
@@ -67,41 +67,47 @@ impl ExplainInterpreter {
 
     fn explain_graph(&self) -> Result<DataBlock> {
         let schema = self.schema();
-        let plan = apply_plan_rewrite(Optimizers::create(self.ctx.clone()), &self.explain.input)?;
-        let formatted_plan = Series::new(
+        let plan = plan_schedulers::apply_plan_rewrite(
+            Optimizers::create(self.ctx.clone()),
+            &self.explain.input,
+        )?;
+        let formatted_plan = Series::from_data(
             format!("{}", plan.display_graphviz())
                 .lines()
                 .map(|s| s.as_bytes())
                 .collect::<Vec<_>>(),
         );
-        Ok(DataBlock::create_by_array(schema, vec![formatted_plan]))
+        Ok(DataBlock::create(schema, vec![formatted_plan]))
     }
 
     fn explain_syntax(&self) -> Result<DataBlock> {
         let schema = self.schema();
-        let plan = apply_plan_rewrite(Optimizers::create(self.ctx.clone()), &self.explain.input)?;
-        let formatted_plan = Series::new(
+        let plan = plan_schedulers::apply_plan_rewrite(
+            Optimizers::create(self.ctx.clone()),
+            &self.explain.input,
+        )?;
+        let formatted_plan = Series::from_data(
             format!("{:?}", plan)
                 .lines()
                 .map(|s| s.as_bytes())
                 .collect::<Vec<_>>(),
         );
-        Ok(DataBlock::create_by_array(schema, vec![formatted_plan]))
+        Ok(DataBlock::create(schema, vec![formatted_plan]))
     }
 
     fn explain_pipeline(&self) -> Result<DataBlock> {
         let schema = self.schema();
         let optimizer = Optimizers::without_scatters(self.ctx.clone());
-        let plan = apply_plan_rewrite(optimizer, &self.explain.input)?;
+        let plan = plan_schedulers::apply_plan_rewrite(optimizer, &self.explain.input)?;
 
         let pipeline_builder = PipelineBuilder::create(self.ctx.clone());
         let pipeline = pipeline_builder.build(&plan)?;
-        let formatted_pipeline = Series::new(
+        let formatted_pipeline = Series::from_data(
             format!("{:?}", pipeline)
                 .lines()
                 .map(|s| s.as_bytes())
                 .collect::<Vec<_>>(),
         );
-        Ok(DataBlock::create_by_array(schema, vec![formatted_pipeline]))
+        Ok(DataBlock::create(schema, vec![formatted_pipeline]))
     }
 }

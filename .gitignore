@@ -4,10 +4,11 @@
 # visual studio code files
 .vscode
 .dir-locals.el
+.bash_history
+.mysql_history
 
 # Rust
-target/*
-distro/*
+target/
 cli/e2e/bendctl
 .cargo/config.toml
 
@@ -28,21 +29,31 @@ perf.*
 *.err
 *.error
 *.swp
-_local_fs/*
-_meta*/*
-stateless_test_data/*
-**/_logs*/*
+_local_fs/
+**/_meta*/
+stateless_test_data/
+**/_logs*/
 _data/
-_tmp/*
-tls/certs/*
+_cache/
+_tmp/
+tls/certs/
+.databend/
+checksums.txt
+
+# fuzz
+hfuzz_target/
+hfuzz_workspace/
 
 # for tests in mac
 *.stderr-e
 *.stdout-e
 tests/perfs/*-result.json
+docker/build-tool/dev_setup.sh
+docker/build-tool/rust-toolchain.toml
 
 # python
 venv/
 *.pyc
-__pycache__/*
+__pycache__/
 
+*.zip

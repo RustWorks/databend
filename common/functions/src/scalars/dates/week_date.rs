@@ -25,9 +25,13 @@ use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
+use crate::scalars::assert_date_or_datetime;
+use crate::scalars::assert_numeric;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionAdapter;
+use crate::scalars::FunctionDescription;
+use crate::scalars::Monotonicity;
 
 #[derive(Clone, Debug)]
 pub struct WeekFunction<T, R> {
@@ -38,11 +42,12 @@ pub struct WeekFunction<T, R> {
 
 pub trait WeekResultFunction<R> {
     const IS_DETERMINISTIC: bool;
-    const MAYBE_MONOTONIC: bool;
 
-    fn return_type() -> Result<DataType>;
-    fn to_number(_value: DateTime<Utc>, mode: Option<u64>) -> R;
-    fn to_constant_value(_value: DateTime<Utc>, mode: Option<u64>) -> DataValue;
+    fn return_type() -> Result<DataTypePtr>;
+    fn to_number(_value: DateTime<Utc>, mode: u64) -> R;
+    fn factor_function() -> Option<Box<dyn Function>> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -50,13 +55,11 @@ pub struct ToStartOfWeek;
 
 impl WeekResultFunction<u32> for ToStartOfWeek {
     const IS_DETERMINISTIC: bool = true;
-    const MAYBE_MONOTONIC: bool = true;
 
-    fn return_type() -> Result<DataType> {
-        Ok(DataType::Date16)
+    fn return_type() -> Result<DataTypePtr> {
+        Ok(Date16Type::arc())
     }
-    fn to_number(value: DateTime<Utc>, mode: Option<u64>) -> u32 {
-        let week_mode = mode.unwrap_or(0);
+    fn to_number(value: DateTime<Utc>, week_mode: u64) -> u32 {
         let mut weekday = value.weekday().number_from_sunday();
         if week_mode & 1 == 1 {
             weekday = value.weekday().number_from_monday();
@@ -66,17 +69,15 @@ impl WeekResultFunction<u32> for ToStartOfWeek {
         let result = value.sub(duration);
         get_day(result)
     }
-
-    fn to_constant_value(value: DateTime<Utc>, mode: Option<u64>) -> DataValue {
-        DataValue::UInt16(Some(Self::to_number(value, mode) as u16))
-    }
 }
 
 impl<T, R> WeekFunction<T, R>
 where
     T: WeekResultFunction<R> + Clone + Sync + Send + 'static,
-    R: DFPrimitiveType + Clone,
-    DFPrimitiveArray<R>: IntoSeries,
+    R: PrimitiveType + Clone,
+    R: Scalar<ColumnType = PrimitiveColumn<R>>,
+    for<'a> R: Scalar<RefType<'a> = R>,
+    for<'a> R: ScalarRef<'a, ScalarType = R, ColumnType = PrimitiveColumn<R>>,
 {
     pub fn try_create(display_name: &str) -> Result<Box<dyn Function>> {
         Ok(Box::new(WeekFunction::<T, R> {
@@ -87,14 +88,12 @@ where
     }
 
     pub fn desc() -> FunctionDescription {
-        let mut features = FunctionFeatures::default();
+        let mut features = FunctionFeatures::default()
+            .monotonicity()
+            .variadic_arguments(1, 2);
 
         if T::IS_DETERMINISTIC {
             features = features.deterministic();
-        }
-
-        if T::MAYBE_MONOTONIC {
-            features = features.monotonicity();
         }
 
         FunctionDescription::creator(Box::new(Self::try_create)).features(features)
@@ -104,96 +103,104 @@ where
 impl<T, R> Function for WeekFunction<T, R>
 where
     T: WeekResultFunction<R> + Clone + Sync + Send,
-    R: DFPrimitiveType + Clone,
-    DFPrimitiveArray<R>: IntoSeries,
+    R: PrimitiveType + Clone,
+    R: Scalar<ColumnType = PrimitiveColumn<R>>,
+    for<'a> R: Scalar<RefType<'a> = R>,
+    for<'a> R: ScalarRef<'a, ScalarType = R, ColumnType = PrimitiveColumn<R>>,
 {
     fn name(&self) -> &str {
         self.display_name.as_str()
     }
 
-    fn return_type(&self, _args: &[DataType]) -> Result<DataType> {
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        assert_date_or_datetime(args[0])?;
+        if args.len() > 1 {
+            assert_numeric(args[1])?;
+        }
         T::return_type()
     }
 
-    fn variadic_arguments(&self) -> Option<(usize, usize)> {
-        Some((1, 2))
-    }
+    fn eval(&self, columns: &ColumnsWithField, input_rows: usize) -> Result<ColumnRef> {
+        let mut mode = 0;
+        if columns.len() > 1 {
+            if input_rows != 1 && !columns[1].column().is_const() {
+                return Err(ErrorCode::BadArguments(
+                    "Expected constant column for the second argument, a constant mode from 0-9"
+                        .to_string(),
+                ));
+            }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
-        let data_type = columns[0].data_type();
-        let mut mode: Option<u64> = None;
-        if columns.len() == 2 && !columns[1].column().is_empty() {
-            let week_mode = columns[1].column().to_values()?[0].clone().as_u64()?;
+            let week_mode = columns[1].column().get_u64(0)?;
             if !(0..=9).contains(&week_mode) {
                 return Err(ErrorCode::BadArguments(format!(
                     "The parameter:{} range is abnormal, it should be between 0-9",
                     week_mode
                 )));
             }
-            mode = Some(week_mode);
+            mode = week_mode;
         }
-        let number_array: DataColumn = match data_type {
-            DataType::Date16 => {
-                if let DataColumn::Constant(v, _) = columns[0].column() {
-                    let date_time = Utc.timestamp(v.as_u64()? as i64 * 24 * 3600, 0_u32);
-                    let constant_result = T::to_constant_value(date_time, mode);
-                    Ok(DataColumn::Constant(constant_result, input_rows))
-                } else {
-                    let result: DFPrimitiveArray<R> = columns[0].column()
-                        .to_array()?
-                        .u16()?
-                        .apply_cast_numeric(|v| {
+
+        match columns[0].data_type().data_type_id() {
+            TypeID::Date16 => {
+
+                    let col: &UInt16Column = Series::check_get(columns[0].column())?;
+                    let iter = col.scalar_iter().map(|v| {
                             let date_time = Utc.timestamp(v as i64 * 24 * 3600, 0_u32);
                             T::to_number(date_time, mode)
-                        }
-                        );
-                    Ok(result.into())
-                }
+                    });
+                    Ok(PrimitiveColumn::<R>::from_owned_iterator(iter).arc())
             },
-            DataType::Date32 => {
-                if let DataColumn::Constant(v, _) = columns[0].column() {
-                    let date_time = Utc.timestamp(v.as_i64()?  * 24 * 3600, 0_u32);
-                    let constant_result = T::to_constant_value(date_time, mode);
-                    Ok(DataColumn::Constant(constant_result, input_rows))
-                } else {
-                    let result = columns[0].column()
-                        .to_array()?
-                        .i32()?
-                        .apply_cast_numeric(|v| {
-                            let date_time = Utc.timestamp(v as i64 * 24 * 3600, 0_u32);
+            TypeID::Date32 => {
+                    let col: &Int32Column = Series::check_get(columns[0].column())?;
+                    let iter = col.scalar_iter().map(|v| {
+                           let date_time = Utc.timestamp(v as i64 * 24 * 3600, 0_u32);
                             T::to_number(date_time, mode)
-                        }
-                        );
-                    Ok(result.into())
-                }
+                    });
+                    Ok(PrimitiveColumn::<R>::from_owned_iterator(iter).arc())
             },
-            DataType::DateTime32(_) => {
-                if let DataColumn::Constant(v, _) = columns[0].column() {
-                    let date_time = Utc.timestamp(v.as_i64()?, 0_u32);
-                    let constant_result = T::to_constant_value(date_time, mode);
-                    Ok(DataColumn::Constant(constant_result, input_rows))
-                } else {
-                    let result = columns[0].column()
-                        .to_array()?
-                        .u32()?
-                        .apply_cast_numeric(|v| {
+            TypeID::DateTime32 => {
+                    let col: &UInt32Column = Series::check_get(columns[0].column())?;
+                    let iter = col.scalar_iter().map(|v| {
                             let date_time = Utc.timestamp(v as i64, 0_u32);
                             T::to_number(date_time, mode)
-                        }
-                        );
-                    Ok(result.into())
-                }
+                    });
+                    Ok(PrimitiveColumn::<R>::from_owned_iterator(iter).arc())
+            },
+
+            TypeID::DateTime64 => {
+                    let col: &Int64Column = Series::check_get(columns[0].column())?;
+                    let iter = col.scalar_iter().map(|v| {
+                            let date_time = Utc.timestamp(v as i64, 0_u32);
+                            T::to_number(date_time, mode)
+                    });
+                    Ok(PrimitiveColumn::<R>::from_owned_iterator(iter).arc())
             },
             other => Result::Err(ErrorCode::IllegalDataType(format!(
                 "Illegal type {:?} of argument of function {}.Should be a date16/data32 or a dateTime32",
                 other,
                 self.name()))),
-        }?;
-        Ok(number_array)
+        }
+    }
+
+    fn get_monotonicity(&self, args: &[Monotonicity]) -> Result<Monotonicity> {
+        let func = match T::factor_function() {
+            Some(f) => f,
+            None => return Ok(Monotonicity::clone_without_range(&args[0])),
+        };
+
+        if args[0].left.is_none() || args[0].right.is_none() {
+            return Ok(Monotonicity::default());
+        }
+
+        let func = FunctionAdapter::create(func);
+        let left_val = func.eval(&[args[0].left.clone().unwrap()], 1)?.get(0);
+        let right_val = func.eval(&[args[0].right.clone().unwrap()], 1)?.get(0);
+        // The function is monotonous, if the factor eval returns the same values for them.
+        if left_val == right_val {
+            return Ok(Monotonicity::clone_without_range(&args[0]));
+        }
+
+        Ok(Monotonicity::default())
     }
 }
 

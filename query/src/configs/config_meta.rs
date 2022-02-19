@@ -14,11 +14,12 @@
 
 use std::fmt;
 
-use common_flight_rpc::FlightClientConf;
-use common_flight_rpc::FlightClientTlsConfig;
-use common_meta_flight::MetaFlightClientConf;
-use structopt::StructOpt;
-use structopt_toml::StructOptToml;
+use clap::Args;
+use common_grpc::RpcClientConf;
+use common_grpc::RpcClientTlsConfig;
+use common_meta_grpc::MetaGrpcClientConf;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::configs::Config;
 
@@ -31,55 +32,48 @@ pub const META_RPC_TLS_SERVER_ROOT_CA_CERT: &str = "META_RPC_TLS_SERVER_ROOT_CA_
 pub const META_RPC_TLS_SERVICE_DOMAIN_NAME: &str = "META_RPC_TLS_SERVICE_DOMAIN_NAME";
 
 /// Meta config group.
-/// serde(default) make the toml de to default working.
-#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, StructOpt, StructOptToml)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Args)]
+#[serde(default)]
 pub struct MetaConfig {
     /// The dir to store persisted meta state for a embedded meta store
-    #[structopt(long, env = META_EMBEDDED_DIR, default_value = "./_meta_embedded")]
-    #[serde(default)]
+    #[clap(long, env = META_EMBEDDED_DIR, default_value = "./_meta_embedded")]
     pub meta_embedded_dir: String,
 
-    #[structopt(long, env = META_ADDRESS, default_value = "", help = "MetaStore backend address")]
-    #[serde(default)]
+    #[clap(long, env = META_ADDRESS, default_value = "", help = "MetaStore backend address")]
     pub meta_address: String,
 
-    #[structopt(long, env = META_USERNAME, default_value = "", help = "MetaStore backend user name")]
-    #[serde(default)]
+    #[clap(long, env = META_USERNAME, default_value = "", help = "MetaStore backend user name")]
     pub meta_username: String,
 
-    #[structopt(long, env = META_PASSWORD, default_value = "", help = "MetaStore backend user password")]
-    #[serde(default)]
+    #[clap(long, env = META_PASSWORD, default_value = "", help = "MetaStore backend user password")]
     pub meta_password: String,
 
-    #[structopt(
+    #[clap(
         long,
         default_value = "10",
         help = "Timeout for each client request, in seconds"
     )]
-    #[serde(default)]
     pub meta_client_timeout_in_second: u64,
 
-    #[structopt(
+    #[clap(
         long,
         env = "META_RPC_TLS_SERVER_ROOT_CA_CERT",
         default_value = "",
         help = "Certificate for client to identify meta rpc server"
     )]
-    #[serde(default)]
     pub rpc_tls_meta_server_root_ca_cert: String,
 
-    #[structopt(
+    #[clap(
         long,
         env = "META_RPC_TLS_SERVICE_DOMAIN_NAME",
         default_value = "localhost"
     )]
-    #[serde(default)]
     pub rpc_tls_meta_service_domain_name: String,
 }
 
-impl MetaConfig {
-    pub fn default() -> Self {
-        MetaConfig {
+impl Default for MetaConfig {
+    fn default() -> Self {
+        Self {
             meta_embedded_dir: "./_meta_embedded".to_string(),
             meta_address: "".to_string(),
             meta_username: "root".to_string(),
@@ -89,7 +83,9 @@ impl MetaConfig {
             rpc_tls_meta_service_domain_name: "localhost".to_string(),
         }
     }
+}
 
+impl MetaConfig {
     pub fn load_from_env(mut_config: &mut Config) {
         env_helper!(mut_config, meta, meta_address, String, META_ADDRESS);
         env_helper!(mut_config, meta, meta_username, String, META_USERNAME);
@@ -115,30 +111,28 @@ impl MetaConfig {
             && !self.rpc_tls_meta_service_domain_name.is_empty()
     }
 
-    pub fn to_flight_tls_config(&self) -> Option<FlightClientTlsConfig> {
+    pub fn to_grpc_tls_config(&self) -> Option<RpcClientTlsConfig> {
         if !self.is_tls_enabled() {
             return None;
         }
 
-        Some(FlightClientTlsConfig {
+        Some(RpcClientTlsConfig {
             rpc_tls_server_root_ca_cert: self.rpc_tls_meta_server_root_ca_cert.clone(),
             domain_name: self.rpc_tls_meta_service_domain_name.clone(),
         })
     }
 
-    pub fn to_flight_client_config(&self) -> MetaFlightClientConf {
-        let meta_config = FlightClientConf {
+    pub fn to_grpc_client_config(&self) -> MetaGrpcClientConf {
+        let meta_config = RpcClientConf {
             address: self.meta_address.clone(),
             username: self.meta_username.clone(),
             password: self.meta_password.clone(),
-            tls_conf: self.to_flight_tls_config(),
+            tls_conf: self.to_grpc_tls_config(),
         };
 
-        MetaFlightClientConf {
-            // kv service is configured by conf.meta
-            kv_service_config: meta_config.clone(),
-            // copy meta config from query config
-            meta_service_config: meta_config,
+        MetaGrpcClientConf {
+            meta_service_config: meta_config.clone(),
+            kv_service_config: meta_config,
             client_timeout_in_second: self.meta_client_timeout_in_second,
         }
     }

@@ -13,32 +13,29 @@
 // limitations under the License.
 
 use common_exception::exception::Result;
-use common_meta_types::AuthType;
+use common_meta_types::AuthInfo;
+use common_meta_types::PasswordHashMethod;
 use common_meta_types::UserInfo;
 
 #[test]
 fn test_user_info() -> Result<()> {
     // This test will introduce a older UserInfo struct and a new UserInfo struct.
     // And check the serialize(old_userinfo) can be deserialized by the new UserInfo.
-    #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
+    #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Default)]
+    #[serde(default)]
     pub struct OldUserInfo {
-        #[serde(default)]
         pub name: String,
-        #[serde(default)]
         pub hostname: String,
-
-        #[serde(default)]
-        pub password: Vec<u8>,
-
-        #[serde(default)]
-        pub auth_type: AuthType,
+        pub auth_info: AuthInfo,
     }
 
     let old = OldUserInfo {
         name: "old-name".to_string(),
         hostname: "old-host".to_string(),
-        password: Vec::from("pwd"),
-        auth_type: AuthType::Sha256,
+        auth_info: AuthInfo::Password {
+            hash_value: Vec::from("pwd"),
+            hash_method: PasswordHashMethod::Sha256,
+        },
     };
 
     let ser_old = serde_json::to_string(&old)?;
@@ -47,8 +44,10 @@ fn test_user_info() -> Result<()> {
     let expect = UserInfo::new(
         "old-name".to_string(),
         "old-host".to_string(),
-        Vec::from("pwd"),
-        AuthType::Sha256,
+        AuthInfo::Password {
+            hash_value: Vec::from("pwd"),
+            hash_method: PasswordHashMethod::Sha256,
+        },
     );
     assert_eq!(new, expect);
 

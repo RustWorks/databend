@@ -24,9 +24,9 @@ use futures::TryStreamExt;
 
 #[tokio::test]
 async fn test_progress_stream() -> Result<()> {
-    let schema = DataSchemaRefExt::create(vec![DataField::new("a", DataType::Int64, false)]);
+    let schema = DataSchemaRefExt::create(vec![DataField::new("a", i64::to_data_type())]);
 
-    let block = DataBlock::create_by_array(schema.clone(), vec![Series::new(vec![1i64, 2, 3])]);
+    let block = DataBlock::create(schema.clone(), vec![Series::from_data(vec![1i64, 2, 3])]);
 
     let input = DataBlockStream::create(Arc::new(DataSchema::empty()), None, vec![
         block.clone(),
@@ -34,12 +34,7 @@ async fn test_progress_stream() -> Result<()> {
         block,
     ]);
 
-    let mut all_rows = 0;
-    let progress = Box::new(move |value: &ProgressValues| {
-        all_rows += value.read_rows;
-        println!("{}", all_rows);
-    });
-
+    let progress = Arc::new(Progress::create());
     let stream = ProgressStream::try_create(Box::pin(input), progress)?;
     let result = stream.try_collect::<Vec<_>>().await?;
     let block = &result[0];

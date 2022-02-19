@@ -38,7 +38,7 @@ impl DataBlock {
                 columns.push(block.column(i).clone());
             }
 
-            concat_columns.push(DataColumnCommon::concat(&columns)?);
+            concat_columns.push(Series::concat(&columns)?);
         }
 
         Ok(DataBlock::create(

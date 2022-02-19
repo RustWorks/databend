@@ -20,13 +20,18 @@ use std::ops::Sub;
 use std::sync::Arc;
 
 use bytes::BytesMut;
+use common_arrow::arrow::bitmap::Bitmap;
 use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_io::prelude::*;
 use num::traits::AsPrimitive;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::AggregateFunctionRef;
+use super::AggregateNullVariadicAdaptor;
 use super::StateAddr;
 use crate::aggregates::aggregate_function_factory::AggregateFunctionDescription;
 use crate::aggregates::assert_unary_params;
@@ -35,7 +40,9 @@ use crate::aggregates::AggregateFunction;
 use crate::with_match_date_date_time_types;
 use crate::with_match_unsigned_numeric_types;
 
+#[derive(Serialize, Deserialize)]
 struct AggregateWindowFunnelState<T> {
+    #[serde(bound(deserialize = "T: DeserializeOwned"))]
     pub events_list: Vec<(T, u8)>,
     pub sorted: bool,
 }
@@ -44,8 +51,8 @@ impl<T> AggregateWindowFunnelState<T>
 where T: Ord
         + Sub<Output = T>
         + AsPrimitive<u64>
-        + BinarySer
-        + BinaryDe
+        + Serialize
+        + DeserializeOwned
         + Clone
         + Send
         + Sync
@@ -136,27 +143,12 @@ where T: Ord
     }
 
     fn serialize(&self, writer: &mut BytesMut) -> Result<()> {
-        self.sorted.serialize_to_buf(writer)?;
-        writer.write_uvarint(self.events_list.len() as u64)?;
-
-        for (timestamp, event) in self.events_list.iter() {
-            timestamp.serialize_to_buf(writer)?;
-            event.serialize_to_buf(writer)?;
-        }
-        Ok(())
+        serialize_into_buf(writer, self)
     }
 
     fn deserialize(&mut self, reader: &mut &[u8]) -> Result<()> {
-        self.sorted = bool::deserialize(reader)?;
-        let size: u64 = reader.read_uvarint()?;
-        self.events_list = Vec::with_capacity(size as usize);
+        *self = deserialize_from_slice(reader)?;
 
-        for _i in 0..size {
-            let timestamp = T::deserialize(reader)?;
-            let event = u8::deserialize(reader)?;
-
-            self.events_list.push((timestamp, event));
-        }
         Ok(())
     }
 }
@@ -172,27 +164,15 @@ pub struct AggregateWindowFunnelFunction<T> {
 
 impl<T> AggregateFunction for AggregateWindowFunnelFunction<T>
 where
-    T: DFPrimitiveType,
-    T: Ord
-        + Sub<Output = T>
-        + AsPrimitive<u64>
-        + BinarySer
-        + BinaryDe
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: PrimitiveType,
+    T: Ord + Sub<Output = T> + AsPrimitive<u64> + Clone + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
         "AggregateWindowFunnelFunction"
     }
 
-    fn return_type(&self) -> Result<DataType> {
-        Ok(DataType::UInt8)
-    }
-
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
+    fn return_type(&self) -> Result<DataTypePtr> {
+        Ok(u8::to_data_type())
     }
 
     fn init_state(&self, place: StateAddr) {
@@ -203,24 +183,45 @@ where
         Layout::new::<AggregateWindowFunnelState<T>>()
     }
 
-    fn accumulate(&self, place: StateAddr, arrays: &[Series], _input_rows: usize) -> Result<()> {
-        let mut darrays = Vec::with_capacity(self.event_size);
+    fn accumulate(
+        &self,
+        place: StateAddr,
+        columns: &[ColumnRef],
+        validity: Option<&Bitmap>,
+        _input_rows: usize,
+    ) -> Result<()> {
+        let mut dcolumns = Vec::with_capacity(self.event_size);
         for i in 0..self.event_size {
-            let darray = arrays[i + 1].bool()?.inner();
-            darrays.push(darray);
+            let dcolumn: &BooleanColumn = unsafe { Series::static_cast(&columns[i + 1]) };
+            dcolumns.push(dcolumn.values());
         }
 
-        let tarray: &DFPrimitiveArray<T> = arrays[0].static_cast();
+        let tcolumn: &PrimitiveColumn<T> = unsafe { Series::static_cast(&columns[0]) };
         let state = place.get::<AggregateWindowFunnelState<T>>();
-        for (row, timestmap) in tarray.into_iter().enumerate() {
-            if let Some(timestmap) = timestmap {
-                for (i, arr) in darrays.iter().enumerate().take(self.event_size) {
-                    if arr.value(row) {
-                        state.add(*timestmap, (i + 1) as u8);
+
+        match validity {
+            Some(bitmap) => {
+                for ((row, timestamp), valid) in tcolumn.iter().enumerate().zip(bitmap.iter()) {
+                    if valid {
+                        for (i, filter) in dcolumns.iter().enumerate() {
+                            if filter.get_bit(row) {
+                                state.add(*timestamp, (i + 1) as u8);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                for (row, timestamp) in tcolumn.iter().enumerate() {
+                    for (i, filter) in dcolumns.iter().enumerate() {
+                        if filter.get_bit(row) {
+                            state.add(*timestamp, (i + 1) as u8);
+                        }
                     }
                 }
             }
         }
+
         Ok(())
     }
 
@@ -228,23 +229,37 @@ where
         &self,
         places: &[StateAddr],
         offset: usize,
-        arrays: &[Series],
+        columns: &[ColumnRef],
         _input_rows: usize,
     ) -> Result<()> {
-        let mut darrays = Vec::with_capacity(self.event_size);
+        let mut dcolumns = Vec::with_capacity(self.event_size);
         for i in 0..self.event_size {
-            let darray = arrays[i + 1].bool()?.inner();
-            darrays.push(darray);
+            let dcolumn: &BooleanColumn = unsafe { Series::static_cast(&columns[i + 1]) };
+            dcolumns.push(dcolumn.values());
         }
-        let tarray: &DFPrimitiveArray<T> = arrays[0].static_cast();
-        for ((row, timestmap), place) in tarray.into_iter().enumerate().zip(places.iter()) {
-            if let Some(timestmap) = timestmap {
-                let state = (place.next(offset)).get::<AggregateWindowFunnelState<T>>();
-                for (i, arr) in darrays.iter().enumerate().take(self.event_size) {
-                    if arr.value(row) {
-                        state.add(*timestmap, (i + 1) as u8);
-                    }
+
+        let tcolumn: &PrimitiveColumn<T> = unsafe { Series::static_cast(&columns[0]) };
+
+        for ((row, timestamp), place) in tcolumn.iter().enumerate().zip(places.iter()) {
+            let state = (place.next(offset)).get::<AggregateWindowFunnelState<T>>();
+            for (i, filter) in dcolumns.iter().enumerate() {
+                if filter.get_bit(row) {
+                    state.add(*timestamp, (i + 1) as u8);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn accumulate_row(&self, place: StateAddr, columns: &[ColumnRef], row: usize) -> Result<()> {
+        let tcolumn: &PrimitiveColumn<T> = unsafe { Series::static_cast(&columns[0]) };
+        let timestamp = unsafe { tcolumn.value_unchecked(row) };
+
+        let state = place.get::<AggregateWindowFunnelState<T>>();
+        for i in 0..self.event_size {
+            let dcolumn: &BooleanColumn = unsafe { Series::static_cast(&columns[i + 1]) };
+            if dcolumn.values().get_bit(row) {
+                state.add(timestamp, (i + 1) as u8);
             }
         }
         Ok(())
@@ -252,7 +267,7 @@ where
 
     fn serialize(&self, place: StateAddr, writer: &mut BytesMut) -> Result<()> {
         let state = place.get::<AggregateWindowFunnelState<T>>();
-        state.serialize(writer)
+        AggregateWindowFunnelState::<T>::serialize(state, writer)
     }
 
     fn deserialize(&self, place: StateAddr, reader: &mut &[u8]) -> Result<()> {
@@ -268,9 +283,23 @@ where
         Ok(())
     }
 
-    fn merge_result(&self, place: StateAddr) -> Result<DataValue> {
+    #[allow(unused_mut)]
+    fn merge_result(&self, place: StateAddr, column: &mut dyn MutableColumn) -> Result<()> {
+        let column: &mut MutablePrimitiveColumn<u8> = Series::check_get_mutable_column(column)?;
         let result = self.get_event_level(place);
-        Ok(DataValue::UInt8(Some(result)))
+        column.append_value(result);
+        Ok(())
+    }
+
+    fn get_own_null_adaptor(
+        &self,
+        _nested_function: AggregateFunctionRef,
+        _params: Vec<DataValue>,
+        _arguments: Vec<DataField>,
+    ) -> Result<Option<AggregateFunctionRef>> {
+        Ok(Some(AggregateNullVariadicAdaptor::<false, false>::create(
+            Arc::new(self.clone()),
+        )))
     }
 }
 
@@ -282,16 +311,8 @@ impl<T> fmt::Display for AggregateWindowFunnelFunction<T> {
 
 impl<T> AggregateWindowFunnelFunction<T>
 where
-    T: DFPrimitiveType,
-    T: Ord
-        + Sub<Output = T>
-        + AsPrimitive<u64>
-        + BinarySer
-        + BinaryDe
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: PrimitiveType,
+    T: Ord + Sub<Output = T> + AsPrimitive<u64> + Clone + Send + Sync + 'static,
 {
     pub fn try_create(
         display_name: &str,
@@ -353,14 +374,8 @@ where
 }
 
 macro_rules! creator {
-    ($T: ident, $data_type: expr, $display_name: expr, $params: expr, $arguments: expr) => {
-        if $T::data_type() == $data_type {
-            return AggregateWindowFunnelFunction::<$T>::try_create(
-                $display_name,
-                $params,
-                $arguments,
-            );
-        }
+    ($T: ident,  $display_name: expr, $params: expr, $arguments: expr) => {
+        return AggregateWindowFunnelFunction::<$T>::try_create($display_name, $params, $arguments);
     };
 }
 
@@ -373,17 +388,17 @@ pub fn try_create_aggregate_window_funnel_function(
     assert_variadic_arguments(display_name, arguments.len(), (1, 32))?;
 
     for (idx, arg) in arguments[1..].iter().enumerate() {
-        if arg.data_type() != &DataType::Boolean {
+        if arg.data_type().data_type_id() != TypeID::Boolean {
             return Err(ErrorCode::BadDataValueType(format!(
-                "Illegal type of the argument {} in AggregateWindowFunnelFunction, must be boolean, got: {}",
+                "Illegal type of the argument {:?} in AggregateWindowFunnelFunction, must be boolean, got: {:?}",
                  idx + 1, arg.data_type()
             )));
         }
     }
 
     let data_type = arguments[0].data_type();
-    with_match_date_date_time_types! {creator, data_type.clone(), display_name, params, arguments}
-    with_match_unsigned_numeric_types! {creator, data_type.clone(), display_name, params, arguments}
+    with_match_date_date_time_types! {creator, data_type.data_type_id(), display_name, params, arguments}
+    with_match_unsigned_numeric_types! {creator, data_type.data_type_id(), display_name, params, arguments}
 
     Err(ErrorCode::BadDataValueType(format!(
         "AggregateWindowFunnelFunction does not support type '{:?}'",

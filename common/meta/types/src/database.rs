@@ -14,10 +14,16 @@
 //
 
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::fmt::Formatter;
 use std::ops::Deref;
+
+use common_datavalues::chrono::DateTime;
+use common_datavalues::chrono::Utc;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct DatabaseNameIdent {
+    pub tenant: String,
     pub db_name: String,
 }
 
@@ -29,17 +35,47 @@ pub struct DatabaseInfo {
     pub meta: DatabaseMeta,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseMeta {
     pub engine: String,
+    pub engine_options: HashMap<String, String>,
+    pub options: HashMap<String, String>,
+    pub created_on: DateTime<Utc>,
+}
+
+impl Default for DatabaseMeta {
+    fn default() -> Self {
+        DatabaseMeta {
+            engine: "".to_string(),
+            engine_options: HashMap::new(),
+            options: HashMap::new(),
+            created_on: Utc::now(),
+        }
+    }
+}
+
+impl Display for DatabaseMeta {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Engine: {}={:?}, Options: {:?}, CreatedOn: {:?}",
+            self.engine, self.engine_options, self.options, self.created_on
+        )
+    }
+}
+
+impl DatabaseInfo {
+    pub fn engine(&self) -> &str {
+        &self.meta.engine
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct CreateDatabaseReq {
     pub if_not_exists: bool,
+    pub tenant: String,
     pub db: String,
-    pub engine: String,
-    pub options: HashMap<String, String>,
+    pub meta: DatabaseMeta,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -50,6 +86,7 @@ pub struct CreateDatabaseReply {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub struct DropDatabaseReq {
     pub if_exists: bool,
+    pub tenant: String,
     pub db: String,
 }
 
@@ -70,9 +107,10 @@ impl Deref for GetDatabaseReq {
 }
 
 impl GetDatabaseReq {
-    pub fn new(db_name: impl Into<String>) -> GetDatabaseReq {
+    pub fn new(tenant: impl Into<String>, db_name: impl Into<String>) -> GetDatabaseReq {
         GetDatabaseReq {
             inner: DatabaseNameIdent {
+                tenant: tenant.into(),
                 db_name: db_name.into(),
             },
         }
@@ -80,4 +118,6 @@ impl GetDatabaseReq {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-pub struct ListDatabaseReq {}
+pub struct ListDatabaseReq {
+    pub tenant: String,
+}

@@ -58,7 +58,7 @@ where R: io::Read + Send + Sync
             .fields()
             .iter()
             .map(|f| f.data_type().create_deserializer(self.block_size))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         let col_size = desers.len();
         let mut rows = 0;
@@ -117,14 +117,11 @@ where R: io::Read + Send + Sync
             return Ok(None);
         }
         self.rows += rows;
-        let series = desers
+        let columns = desers
             .iter_mut()
-            .map(|deser| deser.finish_to_series())
+            .map(|deser| deser.finish_to_column())
             .collect::<Vec<_>>();
 
-        Ok(Some(DataBlock::create_by_array(
-            self.schema.clone(),
-            series,
-        )))
+        Ok(Some(DataBlock::create(self.schema.clone(), columns)))
     }
 }

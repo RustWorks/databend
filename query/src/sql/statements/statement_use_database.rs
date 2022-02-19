@@ -32,15 +32,15 @@ pub struct DfUseDatabase {
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfUseDatabase {
-    #[tracing::instrument(level = "info", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
+    #[tracing::instrument(level = "debug", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
     async fn analyze(&self, _ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
         if self.name.0.is_empty() {
             return Result::Err(ErrorCode::SyntaxException("Use database name is empty"));
         }
 
         let db = self.name.0[0].value.clone();
-        Ok(AnalyzedResult::SimpleQuery(PlanNode::UseDatabase(
-            UseDatabasePlan { db },
+        Ok(AnalyzedResult::SimpleQuery(Box::new(
+            PlanNode::UseDatabase(UseDatabasePlan { db }),
         )))
     }
 }

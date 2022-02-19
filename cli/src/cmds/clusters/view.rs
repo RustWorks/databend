@@ -120,7 +120,7 @@ impl ViewCommand {
                 }
             }
             Err(e) => {
-                writer.write_err(format!("View precheck failed: {:?}", e));
+                writer.write_err(format!("View precheck failed: {e:?}"));
             }
         }
         Ok(())
@@ -138,14 +138,14 @@ impl ViewCommand {
         }
         let s = System::new_all();
 
-        if s.process_by_name("databend-meta").is_empty() {
+        if s.processes_by_name("databend-meta").count() == 0 {
             return Err(CliError::Unknown(
                 "❗ cannot find existing meta service on local machine"
                     .parse()
                     .unwrap(),
             ));
         }
-        if s.process_by_name("databend-query").is_empty() {
+        if s.processes_by_name("databend-query").count() == 0 {
             return Err(CliError::Unknown(
                 "❗ cannot find existing query service on local machine"
                     .parse()
@@ -217,7 +217,7 @@ impl Command for ViewCommand {
             .arg(
                 Arg::new("profile")
                     .long("profile")
-                    .about("Profile to view, support local and clusters")
+                    .help("Profile to view, support local and clusters")
                     .required(false)
                     .takes_value(true),
             )

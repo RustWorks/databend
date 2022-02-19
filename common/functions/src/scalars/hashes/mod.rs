@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod blake3hash;
+mod city64_with_seed;
 mod hash;
+mod hash_base;
 mod md5hash;
 mod sha1hash;
 mod sha2hash;
-mod siphash;
 
-pub use hash::HashesFunction;
+pub use blake3hash::Blake3HashFunction;
+pub use city64_with_seed::City64WithSeedFunction;
+pub use hash::*;
+pub use hash_base::BaseHashFunction;
 pub use md5hash::Md5HashFunction;
 pub use sha1hash::Sha1HashFunction;
 pub use sha2hash::Sha2HashFunction;
-pub use siphash::SipHashFunction;

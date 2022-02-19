@@ -1,4 +1,4 @@
-// Copyright 2021 Datafuse Labs.
+// Copyright 2022 Datafuse Labs.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,19 +13,17 @@
 // limitations under the License.
 
 use std::fmt;
+use std::ops::Sub;
+use std::str;
+use std::sync::Arc;
 
-use common_arrow::arrow::array::Array;
-use common_datavalues::columns::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
 use common_datavalues::prelude::*;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
 use common_exception::ErrorCode;
 use common_exception::Result;
 
-use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
 use crate::scalars::Function;
+use crate::scalars::FunctionDescription;
 
 #[derive(Clone)]
 pub struct RunningDifferenceFunction {
@@ -41,7 +39,7 @@ impl RunningDifferenceFunction {
 
     pub fn desc() -> FunctionDescription {
         FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default())
+            .features(FunctionFeatures::default().num_arguments(1))
     }
 }
 
@@ -50,100 +48,129 @@ impl Function for RunningDifferenceFunction {
         self.display_name.as_str()
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        match args[0] {
-            DataType::Int8 | DataType::UInt8 => Ok(DataType::Int16),
-            DataType::Int16 | DataType::UInt16 | DataType::Date16 => Ok(DataType::Int32),
-            DataType::Int32
-            | DataType::UInt32
-            | DataType::Int64
-            | DataType::UInt64
-            | DataType::Date32
-            | DataType::DateTime32(_) => Ok(DataType::Int64),
-            DataType::Float32 | DataType::Float64 => Ok(DataType::Float64),
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        let nullable = args.iter().any(|arg| arg.is_nullable());
+        let dt = remove_nullable(args[0]);
+
+        let output_type = match dt.data_type_id() {
+            TypeID::Int8 | TypeID::UInt8 => Ok(type_primitive::Int16Type::arc()),
+            TypeID::Int16 | TypeID::UInt16 | TypeID::Date16 => Ok(type_primitive::Int32Type::arc()),
+            TypeID::Int32
+            | TypeID::UInt32
+            | TypeID::Int64
+            | TypeID::UInt64
+            | TypeID::Date32
+            | TypeID::DateTime32
+            | TypeID::DateTime64
+            | TypeID::Interval => Ok(type_primitive::Int64Type::arc()),
+            TypeID::Float32 | TypeID::Float64 => Ok(type_primitive::Float64Type::arc()),
             _ => Result::Err(ErrorCode::IllegalDataType(
                 "Argument for function runningDifference must have numeric type",
             )),
+        }?;
+
+        if nullable {
+            Ok(Arc::new(NullableType::create(output_type)))
+        } else {
+            Ok(output_type)
         }
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(true)
-    }
+    fn eval(&self, columns: &ColumnsWithField, input_rows: usize) -> Result<ColumnRef> {
+        let dt = remove_nullable(columns[0].data_type());
+        let col = columns[0].column();
+        match dt.data_type_id() {
+            TypeID::Int8 => compute_i8(col, input_rows),
+            TypeID::UInt8 => compute_u8(col, input_rows),
+            TypeID::Int16 => compute_i16(col, input_rows),
+            TypeID::UInt16 | TypeID::Date16 => compute_u16(col, input_rows),
+            TypeID::Int32 | TypeID::Date32 => compute_i32(col, input_rows),
+            TypeID::UInt32 | TypeID::DateTime32 => compute_u32(col, input_rows),
+            TypeID::Int64 | TypeID::Interval | TypeID::DateTime64 => compute_i64(col, input_rows),
+            TypeID::UInt64 => compute_u64(col, input_rows),
+            TypeID::Float32 => compute_f32(col, input_rows),
+            TypeID::Float64 => compute_f64(col, input_rows),
 
-    fn eval(&self, columns: &DataColumnsWithField, input_rows: usize) -> Result<DataColumn> {
-        match columns[0].data_type() {
-            DataType::Int8 => compute_i8(columns[0].column(), input_rows),
-            DataType::UInt8 => compute_u8(columns[0].column(), input_rows),
-            DataType::Int16 => compute_i16(columns[0].column(), input_rows),
-            DataType::UInt16 | DataType::Date16 => compute_u16(columns[0].column(), input_rows),
-            DataType::Int32 | DataType::Date32 => compute_i32(columns[0].column(), input_rows),
-            DataType::UInt32 | DataType::DateTime32(_) => {
-                compute_u32(columns[0].column(), input_rows)
-            }
-            DataType::Int64 => compute_i64(columns[0].column(), input_rows),
-            DataType::UInt64 => compute_u64(columns[0].column(), input_rows),
-            DataType::Float32 => compute_f32(columns[0].column(), input_rows),
-            DataType::Float64 => compute_f64(columns[0].column(), input_rows),
             _ => Result::Err(ErrorCode::IllegalDataType(
                 format!(
                     "Argument for function runningDifference must have numeric type.: While processing runningDifference({})",
                     columns[0].field().name(),
-                ))),
+                )))
         }
     }
 
-    fn num_arguments(&self) -> usize {
-        1
+    // The function runningDifference compares the value[index] and value[index-1].
+    // If we set passthrough_null to be true, the input will be optimized with non-null + masking.
+    // Considering tht we actually need two masks(one for value[index], the other value[index-1]) for validity,
+    // we choose to handler the nullable ourselves.
+    fn passthrough_null(&self) -> bool {
+        false
     }
 }
 
 macro_rules! run_difference_compute {
-    ($method_name:ident, $to_df_array:ident, $result_logic_type:ident, $result_primitive_type:ty) => {
-        fn $method_name(column: &DataColumn, input_rows: usize) -> Result<DataColumn> {
-            if let DataColumn::Constant(_, _) = column {
-                Ok(DataColumn::Constant(
-                    DataValue::$result_logic_type(Some(0_i8 as $result_primitive_type)),
-                    input_rows,
-                ))
-            } else {
-                let series = column.to_array()?;
-                let array = series.$to_df_array()?.inner();
+    ($method_name:ident, $source_primitive_type:ident, $result_data_type:ident, $result_primitive_type:ty, $sub_op:ident) => {
+        fn $method_name(column: &ColumnRef, input_rows: usize) -> Result<ColumnRef> {
+            if column.is_const() || column.is_empty() {
+                let ty = $result_data_type::arc();
+                let column = ty.create_constant_column(&DataValue::Int64(0), input_rows)?;
+                return Ok(column);
+            }
 
-                let mut result_vec = Vec::with_capacity(array.len());
-                for index in 0..array.len() {
-                    match array.is_null(index) {
-                        true => result_vec.push(None),
-                        false => {
-                            if index == 0 {
-                                result_vec.push(Some(0_i8 as $result_primitive_type))
-                            } else if array.is_null(index - 1) {
-                                result_vec.push(None)
-                            } else {
-                                let diff = array.value(index) as $result_primitive_type
-                                    - array.value(index - 1) as $result_primitive_type;
-                                result_vec.push(Some(diff))
-                            }
-                        }
+            let viewer = <$source_primitive_type>::try_create_viewer(column)?;
+            let viewer_iter_a = viewer.iter();
+            let viewer_iter_b = viewer.iter();
+
+            let size = viewer.size();
+            if column.is_nullable() {
+                let mut builder: NullableColumnBuilder<$result_primitive_type> =
+                    NullableColumnBuilder::with_capacity(input_rows);
+
+                builder.append(0 as $result_primitive_type, viewer.valid_at(0));
+                for (a, (index, b)) in viewer_iter_a
+                    .skip(1)
+                    .zip(viewer_iter_b.take(size - 1).enumerate())
+                {
+                    if viewer.null_at(index + 1) || viewer.null_at(index) {
+                        builder.append_null();
+                    } else {
+                        let a = a as $result_primitive_type;
+                        let b = b as $result_primitive_type;
+                        // For Int64/UInt64 subtraction we need to use wrapping
+                        let diff = a.$sub_op(b);
+                        builder.append(diff, true);
                     }
                 }
 
-                Ok(Series::new(result_vec).into())
+                Ok(builder.build(input_rows))
+            } else {
+                let mut builder: ColumnBuilder<$result_primitive_type> =
+                    ColumnBuilder::with_capacity(input_rows);
+                builder.append(0 as $result_primitive_type);
+
+                for (a, b) in viewer_iter_a.skip(1).zip(viewer_iter_b.take(size - 1)) {
+                    let a = a as $result_primitive_type;
+                    let b = b as $result_primitive_type;
+                    // For Int64/UInt64 subtraction we need to use wrapping
+                    let diff = a.$sub_op(b);
+                    builder.append(diff);
+                }
+                Ok(builder.build(input_rows))
             }
         }
     };
 }
 
-run_difference_compute!(compute_i8, i8, Int16, i16);
-run_difference_compute!(compute_u8, u8, Int16, i16);
-run_difference_compute!(compute_i16, i16, Int32, i32);
-run_difference_compute!(compute_u16, u16, Int32, i32);
-run_difference_compute!(compute_i32, i32, Int64, i64);
-run_difference_compute!(compute_u32, u32, Int64, i64);
-run_difference_compute!(compute_i64, i64, Int64, i64);
-run_difference_compute!(compute_u64, u64, Int64, i64);
-run_difference_compute!(compute_f32, f32, Float64, f64);
-run_difference_compute!(compute_f64, f64, Float64, f64);
+run_difference_compute!(compute_i8, i8, Int16Type, i16, sub);
+run_difference_compute!(compute_u8, u8, Int16Type, i16, sub);
+run_difference_compute!(compute_i16, i16, Int32Type, i32, sub);
+run_difference_compute!(compute_u16, u16, Int32Type, i32, sub);
+run_difference_compute!(compute_i32, i32, Int64Type, i64, wrapping_sub);
+run_difference_compute!(compute_u32, u32, Int64Type, i64, wrapping_sub);
+run_difference_compute!(compute_i64, i64, Int64Type, i64, wrapping_sub);
+run_difference_compute!(compute_u64, u64, Int64Type, i64, wrapping_sub);
+run_difference_compute!(compute_f32, f32, Float64Type, f64, sub);
+run_difference_compute!(compute_f64, f64, Float64Type, f64, sub);
 
 impl fmt::Display for RunningDifferenceFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

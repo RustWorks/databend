@@ -11,15 +11,23 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 mod cluster;
+mod role;
+mod setting;
 mod stage;
+mod udf;
 mod user;
 
 pub use cluster::ClusterApi;
 pub use cluster::ClusterMgr;
+pub use role::RoleApi;
+pub use role::RoleMgr;
+pub use setting::SettingApi;
+pub use setting::SettingMgr;
+pub use stage::StageApi;
 pub use stage::StageMgr;
-pub use stage::StageMgrApi;
-pub use user::user_api::UserMgrApi;
-pub use user::user_mgr::UserMgr;
+pub use udf::UdfApi;
+pub use udf::UdfMgr;
+pub use user::UserApi;
+pub use user::UserMgr;

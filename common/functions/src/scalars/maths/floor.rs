@@ -1,4 +1,4 @@
-// Copyright 2020 Datafuse Lfloor.
+// Copyright 2021 Datafuse Labs.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,18 @@
 use std::fmt;
 use std::str;
 
-use common_datavalues::prelude::ArrayApply;
-use common_datavalues::prelude::DataColumn;
-use common_datavalues::prelude::DataColumnsWithField;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
-use common_exception::ErrorCode;
+use common_datavalues::prelude::*;
+use common_datavalues::with_match_primitive_type_id;
 use common_exception::Result;
+use num::cast::AsPrimitive;
 
+use crate::scalars::function_common::assert_numeric;
 use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
+use crate::scalars::EvalContext;
 use crate::scalars::Function;
+use crate::scalars::Monotonicity;
+use crate::scalars::ScalarUnaryExpression;
 
 #[derive(Clone)]
 pub struct FloorFunction {
@@ -40,9 +41,18 @@ impl FloorFunction {
     }
 
     pub fn desc() -> FunctionDescription {
-        FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic().monotonicity())
+        FunctionDescription::creator(Box::new(Self::try_create)).features(
+            FunctionFeatures::default()
+                .deterministic()
+                .monotonicity()
+                .num_arguments(1),
+        )
     }
+}
+
+fn floor<S>(value: S, _ctx: &mut EvalContext) -> f64
+where S: AsPrimitive<f64> {
+    value.as_().floor()
 }
 
 impl Function for FloorFunction {
@@ -50,48 +60,26 @@ impl Function for FloorFunction {
         &*self.display_name
     }
 
-    fn num_arguments(&self) -> usize {
-        1
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        assert_numeric(args[0])?;
+        Ok(Float64Type::arc())
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if matches!(
-            args[0],
-            DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::UInt64
-                | DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::String
-                | DataType::Null
-        ) {
-            Ok(DataType::Float64)
-        } else {
-            Err(ErrorCode::IllegalDataType(format!(
-                "Expected numeric types, but got {}",
-                args[0]
-            )))
-        }
+    fn eval(&self, columns: &ColumnsWithField, _input_rows: usize) -> Result<ColumnRef> {
+        let mut ctx = EvalContext::default();
+        with_match_primitive_type_id!(columns[0].data_type().data_type_id(), |$S| {
+             let unary = ScalarUnaryExpression::<$S, f64, _>::new(floor::<$S>);
+             let col = unary.eval(columns[0].column(), &mut ctx)?;
+             Ok(col.arc())
+        },{
+            unreachable!()
+        })
     }
 
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        let result = columns[0]
-            .column()
-            .to_minimal_array()?
-            .cast_with_type(&DataType::Float64)?
-            .f64()?
-            .apply_cast_numeric(|v| v.floor());
-        let column: DataColumn = result.into();
-        Ok(column)
+    fn get_monotonicity(&self, args: &[Monotonicity]) -> Result<Monotonicity> {
+        // Floor function should be monotonically positive. For val_1 > val2, we should have floor(val_1) >= floor(val_2), and vise versa.
+        // So we return the monotonicity same as the input.
+        Ok(Monotonicity::clone_without_range(&args[0]))
     }
 }
 

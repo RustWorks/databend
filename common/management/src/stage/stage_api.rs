@@ -11,14 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 use common_exception::Result;
 use common_meta_types::SeqV;
 use common_meta_types::UserStageInfo;
 
 #[async_trait::async_trait]
-pub trait StageMgrApi: Sync + Send {
+pub trait StageApi: Sync + Send {
     // Add a stage info to /tenant/stage-name.
     async fn add_stage(&self, stage: UserStageInfo) -> Result<u64>;
 

@@ -29,7 +29,7 @@ use crate::sql::DfStatement;
 
 #[allow(clippy::enum_variant_names)]
 pub enum AnalyzedResult {
-    SimpleQuery(PlanNode),
+    SimpleQuery(Box<PlanNode>),
     SelectQuery(Box<QueryAnalyzeState>),
     ExplainQuery((ExplainType, Box<QueryAnalyzeState>)),
 }
@@ -107,7 +107,7 @@ impl Debug for QueryAnalyzeState {
         }
 
         if !self.group_by_expressions.is_empty() {
-            debug_struct.field("group_by", &self.group_by_expressions);
+            debug_struct.field("aggregator", &self.group_by_expressions);
         }
 
         if !self.aggregate_expressions.is_empty() {
@@ -149,18 +149,23 @@ impl AnalyzableStatement for DfStatement {
             DfStatement::Query(v) => v.analyze(ctx).await,
             DfStatement::Explain(v) => v.analyze(ctx).await,
             DfStatement::ShowDatabases(v) => v.analyze(ctx).await,
+            DfStatement::ShowCreateDatabase(v) => v.analyze(ctx).await,
             DfStatement::CreateDatabase(v) => v.analyze(ctx).await,
             DfStatement::DropDatabase(v) => v.analyze(ctx).await,
             DfStatement::CreateTable(v) => v.analyze(ctx).await,
             DfStatement::DescribeTable(v) => v.analyze(ctx).await,
+            DfStatement::DescribeStage(v) => v.analyze(ctx).await,
             DfStatement::DropTable(v) => v.analyze(ctx).await,
             DfStatement::TruncateTable(v) => v.analyze(ctx).await,
+            DfStatement::OptimizeTable(v) => v.analyze(ctx).await,
             DfStatement::UseDatabase(v) => v.analyze(ctx).await,
+            DfStatement::UseTenant(v) => v.analyze(ctx).await,
             DfStatement::ShowCreateTable(v) => v.analyze(ctx).await,
             DfStatement::ShowTables(v) => v.analyze(ctx).await,
             DfStatement::ShowSettings(v) => v.analyze(ctx).await,
             DfStatement::ShowProcessList(v) => v.analyze(ctx).await,
             DfStatement::ShowMetrics(v) => v.analyze(ctx).await,
+            DfStatement::ShowGrants(v) => v.analyze(ctx).await,
             DfStatement::KillStatement(v) => v.analyze(ctx).await,
             DfStatement::InsertQuery(v) => v.analyze(ctx).await,
             DfStatement::SetVariable(v) => v.analyze(ctx).await,
@@ -168,8 +173,16 @@ impl AnalyzableStatement for DfStatement {
             DfStatement::AlterUser(v) => v.analyze(ctx).await,
             DfStatement::ShowUsers(v) => v.analyze(ctx).await,
             DfStatement::GrantPrivilege(v) => v.analyze(ctx).await,
+            DfStatement::RevokePrivilege(v) => v.analyze(ctx).await,
             DfStatement::DropUser(v) => v.analyze(ctx).await,
             DfStatement::Copy(v) => v.analyze(ctx).await,
+            DfStatement::CreateStage(v) => v.analyze(ctx).await,
+            DfStatement::ShowFunctions(v) => v.analyze(ctx).await,
+            DfStatement::DropStage(v) => v.analyze(ctx).await,
+            DfStatement::CreateUDF(v) => v.analyze(ctx).await,
+            DfStatement::DropUDF(v) => v.analyze(ctx).await,
+            DfStatement::AlterUDF(v) => v.analyze(ctx).await,
+            DfStatement::ShowEngines(v) => v.analyze(ctx).await,
         }
     }
 }

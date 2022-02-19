@@ -28,10 +28,13 @@ use comfy_table::Color;
 use comfy_table::Table;
 use common_base::ProgressValues;
 use common_datavalues::DataSchemaRef;
+use http::HeaderMap;
+use http::StatusCode;
 use http::Uri;
 use lexical_util::num::AsPrimitive;
 use num_format::Locale;
 use num_format::ToFormattedString;
+use reqwest::multipart;
 use serde_json::json;
 use serde_json::Value;
 
@@ -96,14 +99,14 @@ impl QueryCommand {
                     for query in queries
                         .split(';')
                         .filter(|elem| !elem.trim().is_empty())
-                        .map(|elem| format!("{};", elem))
+                        .map(|elem| format!("{elem};"))
                         .collect::<Vec<String>>()
                     {
                         writer.write_debug(format!("Execute query {} on {}", query.clone(), url));
                         if let Err(e) =
                             query_writer(&cli, url.as_str(), query.clone(), writer).await
                         {
-                            writer.write_err(format!("Query {} execution error: {:?}", query, e));
+                            writer.write_err(format!("Query {query} execution error: {e:?}"));
                         }
                     }
                 } else {
@@ -117,7 +120,7 @@ impl QueryCommand {
             }
             Err(e) => {
                 writer.write_err(format!(
-                "Query command precheck failed, error {:?}, please run `bendctl cluster create` to create a new local cluster or '\\admin' switch to the admin mode", e));
+                "Query command precheck failed, error {e:?}, please run `bendctl cluster create` to create a new local cluster or '\\admin' switch to the admin mode"));
                 Ok(())
             }
         }
@@ -183,11 +186,10 @@ async fn query_writer(
                         "read rows: {}, read bytes: {}, rows/sec: {} (rows/sec), bytes/sec: {} ({}/sec), time: {} sec",
                         stat.read_rows.to_formatted_string(&Locale::en),
                         byte_unit::Byte::from_bytes(stat.read_bytes as u128)
-                            .get_appropriate_unit(false)
-                            .to_string(),
+                            .get_appropriate_unit(false),
                         (stat.read_rows as f64 / time).as_u128().to_formatted_string(&Locale::en),
                         byte_per_sec.get_value(),
-                        byte_per_sec.get_unit().to_string(), time
+                        byte_per_sec.get_unit(), time
                     )
                 );
             }
@@ -203,7 +205,7 @@ async fn query_writer(
 }
 
 // TODO(zhihanz) mTLS support
-pub fn build_query_endpoint(status: &Status) -> Result<(reqwest::Client, String)> {
+fn build_endpoint(status: &Status, path: &str) -> Result<(reqwest::Client, String)> {
     let query_configs = status.get_local_query_configs();
 
     let (_, query) = query_configs.get(0).expect("cannot find query configs");
@@ -221,16 +223,20 @@ pub fn build_query_endpoint(status: &Status) -> Result<(reqwest::Client, String)
             )
             .parse::<SocketAddr>()
             .expect("cannot build query socket address");
-            format!(
-                "http://{}:{}/v1/query?wait_time=-1",
-                address.ip(),
-                address.port()
-            )
+            format!("http://{}:{}{}", address.ip(), address.port(), path)
         } else {
             todo!()
         }
     };
     Ok((client, url))
+}
+
+pub fn build_query_endpoint(status: &Status) -> Result<(reqwest::Client, String)> {
+    build_endpoint(status, "/v1/query?wait_time=-1")
+}
+
+pub fn build_load_endpoint(status: &Status) -> Result<(reqwest::Client, String)> {
+    build_endpoint(status, "/v1/streaming_load")
 }
 
 pub async fn execute_query_json(
@@ -240,7 +246,7 @@ pub async fn execute_query_json(
 ) -> Result<(
     Option<DataSchemaRef>,
     Arc<Vec<Vec<Value>>>,
-    databend_query::servers::http::v1::http_query_handlers::QueryStats,
+    databend_query::servers::http::v1::QueryStats,
 )> {
     let ans = cli
         .post(url)
@@ -248,7 +254,7 @@ pub async fn execute_query_json(
         .send()
         .await
         .expect("cannot post to http handler")
-        .json::<databend_query::servers::http::v1::http_query_handlers::QueryResponse>()
+        .json::<databend_query::servers::http::v1::QueryResponse>()
         .await;
     if let Err(e) = ans {
         return Err(CliError::Unknown(format!(
@@ -274,7 +280,7 @@ pub async fn execute_query_json(
                 ans.error.unwrap()
             )));
         }
-        Ok((ans.columns, ans.data, ans.stats))
+        Ok((ans.schema, ans.data, ans.stats))
     }
 }
 
@@ -304,6 +310,46 @@ async fn execute_query(
     }
 }
 
+pub async fn execute_load(
+    cli: &reqwest::Client,
+    url: &str,
+    headers: HeaderMap,
+    data: Vec<u8>,
+) -> Result<ProgressValues> {
+    let part = multipart::Part::stream(data);
+    let form = multipart::Form::new().part("sample", part);
+
+    let resp = cli
+        .put(url)
+        .headers(headers)
+        .multipart(form)
+        .send()
+        .await
+        .expect("cannot post to http handler");
+    let err_msg = |reason: String| -> String {
+        format!(
+            "http streaming load fail, reason={}, response={:?}",
+            reason, resp
+        )
+    };
+
+    if resp.status() != StatusCode::OK {
+        Err(CliError::Unknown(err_msg(format!(
+            "status_code={}",
+            resp.status()
+        ))))
+    } else {
+        match resp
+            .json::<databend_query::servers::http::v1::LoadResponse>()
+            .await
+        {
+            Ok(v) if v.error.is_none() => Ok(v.stats),
+            Ok(v) => Err(CliError::Unknown(v.error.unwrap())),
+            Err(e) => Err(CliError::Unknown(format!("json decode error={}", e))),
+        }
+    }
+}
+
 #[async_trait]
 impl Command for QueryCommand {
     fn name(&self) -> &str {
@@ -317,14 +363,14 @@ impl Command for QueryCommand {
             .arg(
                 Arg::new("profile")
                     .long("profile")
-                    .about("Profile to run queries")
+                    .help("Profile to run queries")
                     .required(false)
                     .possible_values(&["local"])
                     .default_value("local"),
             )
             .arg(
                 Arg::new("query")
-                    .about("Query statements to run")
+                    .help("Query statements to run")
                     .takes_value(true)
                     .required(true),
             )

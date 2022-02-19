@@ -16,14 +16,16 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use common_datavalues::prelude::*;
-use common_datavalues::DataSchema;
-use common_datavalues::DataType;
-use common_exception::ErrorCode;
+use common_datavalues::with_match_primitive_type_id;
 use common_exception::Result;
+use num::cast::AsPrimitive;
 
+use crate::scalars::function_common::assert_numeric;
 use crate::scalars::function_factory::FunctionDescription;
 use crate::scalars::function_factory::FunctionFeatures;
+use crate::scalars::EvalContext;
 use crate::scalars::Function;
+use crate::scalars::ScalarUnaryExpression;
 
 #[derive(Clone)]
 pub struct AngleFunction<T> {
@@ -32,7 +34,7 @@ pub struct AngleFunction<T> {
 }
 
 pub trait AngleConvertFunction {
-    fn convert(v: f64) -> f64;
+    fn convert(v: impl AsPrimitive<f64>, _ctx: &mut EvalContext) -> f64;
 }
 
 impl<T> AngleFunction<T>
@@ -47,7 +49,7 @@ where T: AngleConvertFunction + Clone + Sync + Send + 'static
 
     pub fn desc() -> FunctionDescription {
         FunctionDescription::creator(Box::new(Self::try_create))
-            .features(FunctionFeatures::default().deterministic())
+            .features(FunctionFeatures::default().deterministic().num_arguments(1))
     }
 }
 
@@ -58,34 +60,20 @@ where T: AngleConvertFunction + Clone + Sync + Send + 'static
         "AngleFunction"
     }
 
-    fn num_arguments(&self) -> usize {
-        1
+    fn return_type(&self, args: &[&DataTypePtr]) -> Result<DataTypePtr> {
+        assert_numeric(args[0])?;
+        Ok(Float64Type::arc())
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if args[0].is_numeric() || args[0] == DataType::String || args[0] == DataType::Null {
-            Ok(DataType::Float64)
-        } else {
-            Err(ErrorCode::IllegalDataType(format!(
-                "Expected numeric, but got {}",
-                args[0]
-            )))
-        }
-    }
-
-    fn nullable(&self, _input_schema: &DataSchema) -> Result<bool> {
-        Ok(true)
-    }
-
-    fn eval(&self, columns: &DataColumnsWithField, _input_rows: usize) -> Result<DataColumn> {
-        let result = columns[0]
-            .column()
-            .to_minimal_array()?
-            .cast_with_type(&DataType::Float64)?
-            .f64()?
-            .apply_cast_numeric(T::convert);
-        let column: DataColumn = result.into();
-        Ok(column.resize_constant(columns[0].column().len()))
+    fn eval(&self, columns: &ColumnsWithField, _input_rows: usize) -> Result<ColumnRef> {
+        let mut ctx = EvalContext::default();
+        with_match_primitive_type_id!(columns[0].data_type().data_type_id(), |$S| {
+             let unary = ScalarUnaryExpression::<$S, f64, _>::new(T::convert);
+             let col = unary.eval(columns[0].column(), &mut ctx)?;
+             Ok(col.arc())
+        },{
+            unreachable!()
+        })
     }
 }
 
@@ -99,8 +87,8 @@ impl<T> fmt::Display for AngleFunction<T> {
 pub struct ToDegrees;
 
 impl AngleConvertFunction for ToDegrees {
-    fn convert(v: f64) -> f64 {
-        v.to_degrees()
+    fn convert(v: impl AsPrimitive<f64>, _ctx: &mut EvalContext) -> f64 {
+        v.as_().to_degrees()
     }
 }
 
@@ -108,8 +96,8 @@ impl AngleConvertFunction for ToDegrees {
 pub struct ToRadians;
 
 impl AngleConvertFunction for ToRadians {
-    fn convert(v: f64) -> f64 {
-        v.to_radians()
+    fn convert(v: impl AsPrimitive<f64>, _ctx: &mut EvalContext) -> f64 {
+        v.as_().to_radians()
     }
 }
 

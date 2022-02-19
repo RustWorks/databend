@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_raft::raft::Entry;
-use async_raft::raft::EntryNormal;
-use async_raft::raft::EntryPayload;
 use common_base::tokio;
-use common_base::GlobalSequence;
-use common_meta_sled_store::get_sled_db;
 use common_meta_sled_store::SledTree;
 use common_meta_types::Cmd;
 use common_meta_types::LogEntry;
 use common_meta_types::LogId;
 use common_meta_types::LogIndex;
 use common_meta_types::SeqV;
+use common_tracing::tracing_futures::Instrument;
+use openraft::raft::Entry;
+use openraft::raft::EntryPayload;
+use testing::new_sled_test_context;
 
+use crate::init_sled_ut;
+use crate::testing;
 use crate::testing::fake_key_spaces::Files;
 use crate::testing::fake_key_spaces::GenericKV;
 use crate::testing::fake_key_spaces::Logs;
@@ -33,24 +34,6 @@ use crate::testing::fake_key_spaces::StateMachineMeta;
 use crate::testing::fake_state_machine_meta::StateMachineMetaKey::Initialized;
 use crate::testing::fake_state_machine_meta::StateMachineMetaKey::LastApplied;
 use crate::testing::fake_state_machine_meta::StateMachineMetaValue;
-
-/// 1. Open a temp sled::Db for all tests.
-/// 2. Initialize a global tracing.
-/// 3. Create a span for a test case. One needs to enter it by `span.enter()` and keeps the guard held.
-#[macro_export]
-macro_rules! init_sled_ut {
-    () => {{
-        let t = tempfile::tempdir().expect("create temp dir to sled db");
-
-        common_meta_sled_store::init_temp_sled_db(t);
-        common_tracing::init_default_ut_tracing();
-
-        let name = common_tracing::func_name!();
-        let span =
-            common_tracing::tracing::debug_span!("ut", "{}", name.split("::").last().unwrap());
-        ((), span)
-    }};
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_sled_tree_open() -> anyhow::Result<()> {
@@ -80,12 +63,10 @@ async fn test_sled_tree_append() -> anyhow::Result<()> {
         }),
         (5, Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         }),
@@ -96,12 +77,10 @@ async fn test_sled_tree_append() -> anyhow::Result<()> {
     let want: Vec<Entry<LogEntry>> = vec![
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -139,12 +118,10 @@ async fn test_sled_tree_append_values_and_range_get() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -304,12 +281,10 @@ async fn test_sled_tree_range() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -423,12 +398,10 @@ async fn test_sled_tree_insert() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -484,12 +457,10 @@ async fn test_sled_tree_contains_key() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -546,12 +517,10 @@ async fn test_sled_tree_get() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -590,12 +559,10 @@ async fn test_sled_tree_last() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -677,12 +644,10 @@ async fn test_sled_tree_range_remove() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -739,12 +704,10 @@ async fn test_sled_tree_multi_types() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -809,12 +772,10 @@ async fn test_as_append() -> anyhow::Result<()> {
         }),
         (5, Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         }),
@@ -825,12 +786,10 @@ async fn test_as_append() -> anyhow::Result<()> {
     let want: Vec<Entry<LogEntry>> = vec![
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -869,12 +828,10 @@ async fn test_as_append_values_and_range_get() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1079,12 +1036,10 @@ async fn test_as_insert() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1141,12 +1096,10 @@ async fn test_as_contains_key() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1205,12 +1158,10 @@ async fn test_as_get() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1246,12 +1197,10 @@ async fn test_as_last() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1314,12 +1263,10 @@ async fn test_as_range_remove() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1378,12 +1325,10 @@ async fn test_as_multi_types() -> anyhow::Result<()> {
         },
         Entry {
             log_id: LogId { term: 3, index: 4 },
-            payload: EntryPayload::Normal(EntryNormal {
-                data: LogEntry {
-                    txid: None,
-                    cmd: Cmd::IncrSeq {
-                        key: "foo".to_string(),
-                    },
+            payload: EntryPayload::Normal(LogEntry {
+                txid: None,
+                cmd: Cmd::IncrSeq {
+                    key: "foo".to_string(),
                 },
             }),
         },
@@ -1429,19 +1374,42 @@ async fn test_as_multi_types() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub struct SledTestContext {
-    pub tree_name: String,
-    pub db: sled::Db,
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_export() -> anyhow::Result<()> {
+    let (_log_guards, ut_span) = init_sled_ut!();
 
-/// Create a new context for testing sled
-pub fn new_sled_test_context() -> SledTestContext {
-    SledTestContext {
-        tree_name: format!("test-{}-", next_port()),
-        db: get_sled_db(),
+    async {
+        let tc = new_sled_test_context();
+        let db = &tc.db;
+        let tree = SledTree::open(db, tc.tree_name, true)?;
+        let log_tree = tree.key_space::<Logs>();
+
+        let logs: Vec<Entry<LogEntry>> = vec![
+            Entry {
+                log_id: LogId { term: 1, index: 2 },
+                payload: EntryPayload::Blank,
+            },
+            Entry {
+                log_id: LogId { term: 3, index: 4 },
+                payload: EntryPayload::Normal(LogEntry {
+                    txid: None,
+                    cmd: Cmd::IncrSeq {
+                        key: "foo".to_string(),
+                    },
+                }),
+            },
+        ];
+
+        log_tree.append_values(&logs).await?;
+
+        let data = tree.export()?;
+
+        for kv in data.iter() {
+            println!("{:?}", kv);
+        }
+
+        Ok(())
     }
-}
-
-pub fn next_port() -> u32 {
-    29000u32 + (GlobalSequence::next() as u32)
+    .instrument(ut_span)
+    .await
 }

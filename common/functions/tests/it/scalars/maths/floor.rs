@@ -1,4 +1,4 @@
-// Copyright 2020 Datafuse Lfloor.
+// Copyright 2021 Datafuse Labs.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,116 +13,70 @@
 // limitations under the License.
 
 use common_datavalues::prelude::*;
-use common_exception::ErrorCode;
 use common_exception::Result;
 use common_functions::scalars::*;
 
+use crate::scalars::scalar_function2_test::test_scalar_functions;
+use crate::scalars::scalar_function2_test::ScalarFunctionTest;
+
 #[test]
 fn test_floor_function() -> Result<()> {
-    struct Test {
-        name: &'static str,
-        func: Box<dyn Function>,
-        arg: DataColumnWithField,
-        expect: Result<DataColumn>,
-    }
     let tests = vec![
-        Test {
+        ScalarFunctionTest {
             name: "floor(123)",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new([123]).into(),
-                DataField::new("arg1", DataType::Int32, false),
-            ),
-            expect: Ok(Series::new(vec![123_f64]).into()),
+            columns: vec![Series::from_data([123])],
+            expect: Series::from_data(vec![123_f64]),
+            error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor(1.7)",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new([1.7]).into(),
-                DataField::new("arg1", DataType::Float64, false),
-            ),
-            expect: Ok(Series::new(vec![1_f64]).into()),
+            columns: vec![Series::from_data([1.7])],
+            expect: Series::from_data(vec![1_f64]),
+            error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor(-2.1)",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new([-2.1]).into(),
-                DataField::new("arg1", DataType::Float64, false),
-            ),
-            expect: Ok(Series::new(vec![-3_f64]).into()),
+            columns: vec![Series::from_data([-2.1])],
+            expect: Series::from_data(vec![-3_f64]),
+            error: "",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor('123')",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new(["123"]).into(),
-                DataField::new("arg1", DataType::String, true),
-            ),
-            expect: Ok(Series::new(vec![123_f64]).into()),
+            columns: vec![Series::from_data(["123"])],
+            expect: Series::from_data(vec![123_f64]),
+            error: "Expected a numeric type, but got String",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor('+123.8a1')",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new(["+123.8a1"]).into(),
-                DataField::new("arg1", DataType::String, true),
-            ),
-            expect: Ok(Series::new(vec![123_f64]).into()),
+            columns: vec![Series::from_data(["+123.8a1"])],
+            expect: Series::from_data(vec![123_f64]),
+            error: "Expected a numeric type, but got String",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor('-123.2a1')",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new(["-123.2a1"]).into(),
-                DataField::new("arg1", DataType::String, true),
-            ),
-            expect: Ok(Series::new(vec![-124_f64]).into()),
+            columns: vec![Series::from_data(["-123.2a1"])],
+            expect: Series::from_data(vec![-124_f64]),
+            error: "Expected a numeric type, but got String",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor('a')",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new(["a"]).into(),
-                DataField::new("arg1", DataType::String, true),
-            ),
-            expect: Ok(Series::new(vec![0_f64]).into()),
+            columns: vec![Series::from_data(["a"])],
+            expect: Series::from_data(vec![0_f64]),
+            error: "Expected a numeric type, but got String",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor('a123')",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new(["a123"]).into(),
-                DataField::new("arg1", DataType::String, true),
-            ),
-            expect: Ok(Series::new(vec![0_f64]).into()),
+            columns: vec![Series::from_data(["a123"])],
+            expect: Series::from_data(vec![0_f64]),
+            error: "Expected a numeric type, but got String",
         },
-        Test {
+        ScalarFunctionTest {
             name: "floor(true)",
-            func: FloorFunction::try_create("floor")?,
-            arg: DataColumnWithField::new(
-                Series::new([true]).into(),
-                DataField::new("arg1", DataType::Boolean, true),
-            ),
-            expect: Err(ErrorCode::IllegalDataType(
-                "Expected numeric types, but got Boolean",
-            )),
+            columns: vec![Series::from_data([true])],
+            expect: Series::from_data([1_u8]),
+            error: "Expected a numeric type, but got Boolean",
         },
     ];
 
-    for t in tests {
-        let func = t.func;
-        let got = func.return_type(&[t.arg.data_type().clone()]);
-        let got = got.and_then(|_| func.eval(&[t.arg], 1));
-        match t.expect {
-            Ok(expected) => {
-                assert_eq!(&got.unwrap(), &expected, "case: {}", t.name);
-            }
-            Err(expected_err) => {
-                assert_eq!(got.unwrap_err().to_string(), expected_err.to_string());
-            }
-        }
-    }
-    Ok(())
+    test_scalar_functions(FloorFunction::try_create("floor")?, &tests)
 }

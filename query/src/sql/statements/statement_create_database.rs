@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_meta_types::DatabaseMeta;
 use common_planners::CreateDatabasePlan;
 use common_planners::PlanNode;
 use common_tracing::tracing;
 use sqlparser::ast::ObjectName;
-use sqlparser::ast::SqlOption;
 
 use crate::sessions::QueryContext;
 use crate::sql::statements::AnalyzableStatement;
@@ -32,25 +32,26 @@ pub struct DfCreateDatabase {
     pub if_not_exists: bool,
     pub name: ObjectName,
     pub engine: String,
-    pub options: Vec<SqlOption>,
+    pub engine_options: HashMap<String, String>,
+    pub options: HashMap<String, String>,
 }
 
 #[async_trait::async_trait]
 impl AnalyzableStatement for DfCreateDatabase {
-    #[tracing::instrument(level = "info", skip(self, _ctx), fields(ctx.id = _ctx.get_id().as_str()))]
-    async fn analyze(&self, _ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
+    #[tracing::instrument(level = "debug", skip(self, ctx), fields(ctx.id = ctx.get_id().as_str()))]
+    async fn analyze(&self, ctx: Arc<QueryContext>) -> Result<AnalyzedResult> {
+        let tenant = ctx.get_tenant();
         let db = self.database_name()?;
-        let engine = self.database_engine()?;
-        let options = self.database_options();
         let if_not_exists = self.if_not_exists;
+        let meta = self.database_meta()?;
 
-        Ok(AnalyzedResult::SimpleQuery(PlanNode::CreateDatabase(
-            CreateDatabasePlan {
-                db,
-                engine,
-                options,
+        Ok(AnalyzedResult::SimpleQuery(Box::new(
+            PlanNode::CreateDatabase(CreateDatabasePlan {
+                tenant,
                 if_not_exists,
-            },
+                db,
+                meta,
+            }),
         )))
     }
 }
@@ -64,14 +65,12 @@ impl DfCreateDatabase {
         Ok(self.name.0[0].value.clone())
     }
 
-    fn database_engine(&self) -> Result<String> {
-        Ok(self.engine.clone())
-    }
-
-    fn database_options(&self) -> HashMap<String, String> {
-        self.options
-            .iter()
-            .map(|option| (option.name.value.to_lowercase(), option.value.to_string()))
-            .collect()
+    fn database_meta(&self) -> Result<DatabaseMeta> {
+        Ok(DatabaseMeta {
+            engine: self.engine.clone(),
+            engine_options: self.engine_options.clone(),
+            options: self.options.clone(),
+            ..Default::default()
+        })
     }
 }

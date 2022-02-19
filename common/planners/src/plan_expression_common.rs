@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
-use common_datavalues::DataSchemaRef;
+use common_datavalues::prelude::*;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_functions::scalars::FunctionFactory;
 
 use crate::Expression;
 use crate::ExpressionVisitor;
@@ -97,7 +99,7 @@ where F: Fn(&Expression) -> bool {
         })
 }
 
-// Visitor that find Expressionessions that match a particular predicate
+// Visitor that find Expressions that match a particular predicate
 struct Finder<'a, F>
 where F: Fn(&Expression) -> bool
 {
@@ -185,9 +187,7 @@ pub fn rebase_expr_from_input(expr: &Expression, schema: &DataSchemaRef) -> Resu
         Expression::Sort { .. }
         | Expression::Column(_)
         | Expression::Literal {
-            value: _,
-            column_name: None,
-            ..
+            column_name: None, ..
         }
         | Expression::Alias(_, _) => Ok(None),
         _ => {
@@ -317,9 +317,11 @@ where F: Fn(&Expression) -> Result<Option<Expression>> {
             Expression::Cast {
                 expr: nested_expr,
                 data_type,
+                is_nullable,
             } => Ok(Expression::Cast {
                 expr: Box::new(clone_with_replacement(&**nested_expr, replacement_fn)?),
                 data_type: data_type.clone(),
+                is_nullable: *is_nullable,
             }),
 
             Expression::Column(_)
@@ -370,4 +372,148 @@ pub fn unwrap_alias_exprs(expr: &Expression) -> Result<Expression> {
         Expression::Alias(_, nested_expr) => Ok(Some(*nested_expr.clone())),
         _ => Ok(None),
     })
+}
+
+pub struct ExpressionDataTypeVisitor {
+    stack: Vec<DataTypePtr>,
+    input_schema: DataSchemaRef,
+}
+
+impl ExpressionDataTypeVisitor {
+    pub fn create(input_schema: DataSchemaRef) -> ExpressionDataTypeVisitor {
+        ExpressionDataTypeVisitor {
+            input_schema,
+            stack: vec![],
+        }
+    }
+
+    pub fn finalize(mut self) -> Result<DataTypePtr> {
+        match self.stack.len() {
+            1 => Ok(self.stack.remove(0)),
+            _ => Err(ErrorCode::LogicalError(
+                "Stack has too many elements in ExpressionDataTypeVisitor::finalize",
+            )),
+        }
+    }
+
+    fn visit_function(mut self, op: &str, args_size: usize) -> Result<ExpressionDataTypeVisitor> {
+        let mut arguments = Vec::with_capacity(args_size);
+        for index in 0..args_size {
+            arguments.push(match self.stack.pop() {
+                None => Err(ErrorCode::LogicalError(format!(
+                    "Expected {} arguments, actual {}.",
+                    args_size, index
+                ))),
+                Some(element) => Ok(element),
+            }?);
+        }
+
+        let arguments: Vec<&DataTypePtr> = arguments.iter().collect();
+
+        let function = FunctionFactory::instance().get(op, &arguments)?;
+        let return_type = function.return_type(&arguments)?;
+        self.stack.push(return_type);
+        Ok(self)
+    }
+}
+
+impl ExpressionVisitor for ExpressionDataTypeVisitor {
+    fn pre_visit(self, _expr: &Expression) -> Result<Recursion<Self>> {
+        Ok(Recursion::Continue(self))
+    }
+
+    fn post_visit(mut self, expr: &Expression) -> Result<Self> {
+        match expr {
+            Expression::Column(s) => {
+                let field = self.input_schema.field_with_name(s)?;
+                self.stack.push(field.data_type().clone());
+                Ok(self)
+            }
+            Expression::Wildcard => Result::Err(ErrorCode::IllegalDataType(
+                "Wildcard expressions are not valid to get return type",
+            )),
+            Expression::QualifiedColumn(_) => Err(ErrorCode::LogicalError(
+                "QualifiedColumn should be resolve in analyze.",
+            )),
+            Expression::Literal { data_type, .. } => {
+                self.stack.push(data_type.clone());
+                Ok(self)
+            }
+            Expression::Subquery { query_plan, .. } => {
+                let data_type = Expression::to_subquery_type(query_plan);
+                self.stack.push(data_type);
+                Ok(self)
+            }
+            Expression::ScalarSubquery { query_plan, .. } => {
+                let data_type = Expression::to_subquery_type(query_plan);
+                self.stack.push(data_type);
+                Ok(self)
+            }
+            Expression::BinaryExpression { op, .. } => self.visit_function(op, 2),
+            Expression::UnaryExpression { op, .. } => self.visit_function(op, 1),
+            Expression::ScalarFunction { op, args } => self.visit_function(op, args.len()),
+            expr @ Expression::AggregateFunction { args, .. } => {
+                // Pop arguments.
+                for index in 0..args.len() {
+                    if self.stack.pop().is_none() {
+                        return Err(ErrorCode::LogicalError(format!(
+                            "Expected {} arguments, actual {}.",
+                            args.len(),
+                            index
+                        )));
+                    }
+                }
+
+                let aggregate_function = expr.to_aggregate_function(&self.input_schema)?;
+                let return_type = aggregate_function.return_type()?;
+
+                self.stack.push(return_type);
+                Ok(self)
+            }
+            Expression::Cast { data_type, .. } => {
+                let inner_type = match self.stack.pop() {
+                    None => Err(ErrorCode::LogicalError(
+                        "Cast expr expected 1 arguments, actual 0.",
+                    )),
+                    Some(_) => Ok(data_type),
+                }?;
+
+                self.stack.push(inner_type.clone());
+                Ok(self)
+            }
+            Expression::Alias(_, _) | Expression::Sort { .. } => Ok(self),
+        }
+    }
+}
+
+// This visitor is for recursively visiting expression tree and collects all columns.
+pub struct RequireColumnsVisitor {
+    pub required_columns: HashSet<String>,
+}
+
+impl RequireColumnsVisitor {
+    pub fn default() -> Self {
+        Self {
+            required_columns: HashSet::new(),
+        }
+    }
+
+    pub fn collect_columns_from_expr(expr: &Expression) -> Result<HashSet<String>> {
+        let mut visitor = Self::default();
+        visitor = expr.accept(visitor)?;
+        Ok(visitor.required_columns)
+    }
+}
+
+impl ExpressionVisitor for RequireColumnsVisitor {
+    fn pre_visit(self, expr: &Expression) -> Result<Recursion<Self>> {
+        match expr {
+            Expression::Column(c) => {
+                let mut v = self;
+                v.required_columns.insert(c.clone());
+                Ok(Recursion::Continue(v))
+            }
+            _ => Ok(Recursion::Continue(self)),
+        }
+    }
 }

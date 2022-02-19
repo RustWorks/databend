@@ -22,6 +22,7 @@ use num::cast::AsPrimitive;
 pub trait DateConverter {
     fn to_date(&self, tz: &Tz) -> Date<Tz>;
     fn to_date_time(&self, tz: &Tz) -> DateTime<Tz>;
+    fn to_date_time64(&self, precision: usize, tz: &Tz) -> DateTime<Tz>;
 }
 
 impl<T> DateConverter for T
@@ -35,5 +36,15 @@ where T: AsPrimitive<i64>
 
     fn to_date_time(&self, tz: &Tz) -> DateTime<Tz> {
         tz.timestamp_millis(self.as_() * 1000)
+    }
+
+    fn to_date_time64(&self, precision: usize, tz: &Tz) -> DateTime<Tz> {
+        let base10: i64 = 10;
+        let nano = self.as_() * base10.pow(9 - precision as u32);
+
+        let sec = nano / 1_000_000_000;
+        let nsec = nano % 1_000_000_000;
+
+        tz.timestamp(sec, nsec as u32)
     }
 }

@@ -12,41 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
-mod optimizer_constant_folding_test;
-#[cfg(test)]
-mod optimizer_expression_transform_test;
-#[cfg(test)]
-mod optimizer_projection_push_down_test;
-#[cfg(test)]
-mod optimizer_scatters_test;
-#[cfg(test)]
-mod optimizer_statistics_exact_test;
-#[cfg(test)]
-mod optimizer_test;
-#[cfg(test)]
-mod utils_test;
-
-#[cfg(test)]
-mod optimizer_top_n_push_down_test;
-
 mod metrics;
 mod optimizer;
 mod optimizer_constant_folding;
 mod optimizer_expression_transform;
-mod optimizer_projection_push_down;
 mod optimizer_scatters;
 mod optimizer_statistics_exact;
 mod optimizer_top_n_push_down;
-mod utils;
 
 pub use optimizer::Optimizer;
 pub use optimizer::Optimizers;
 pub use optimizer_constant_folding::ConstantFoldingOptimizer;
 pub use optimizer_expression_transform::ExprTransformOptimizer;
-pub use optimizer_projection_push_down::ProjectionPushDownOptimizer;
 pub use optimizer_scatters::ScattersOptimizer;
 pub use optimizer_statistics_exact::StatisticsExactOptimizer;
 pub use optimizer_top_n_push_down::TopNPushDownOptimizer;
-pub use utils::MonotonicityCheckVisitor;
-pub use utils::RequireColumnsVisitor;

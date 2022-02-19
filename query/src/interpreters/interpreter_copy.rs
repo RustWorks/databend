@@ -14,20 +14,24 @@
 
 use std::sync::Arc;
 
-use common_dal::DataAccessor;
-use common_dal::S3;
 use common_exception::ErrorCode;
 use common_exception::Result;
 use common_planners::CopyPlan;
 use common_streams::DataBlockStream;
+use common_streams::ProgressStream;
 use common_streams::SendableDataBlockStream;
 use common_streams::SourceFactory;
 use common_streams::SourceParams;
 use common_streams::SourceStream;
+use futures::io::BufReader;
 use futures::TryStreamExt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::IResult;
+use opendal::credential::Credential;
+use opendal::readers::SeekableReader;
+use opendal::services::s3;
+use opendal::Operator as DalOperator;
 
 use crate::interpreters::Interpreter;
 use crate::interpreters::InterpreterPtr;
@@ -68,10 +72,14 @@ impl Interpreter for CopyInterpreter {
         }
         let (stage, path) = c.unwrap();
 
-        let acc = get_dal_by_stage(self.ctx.clone(), stage)?;
+        let acc = get_dal_by_stage(self.ctx.clone(), stage).await?;
         let max_block_size = self.ctx.get_settings().get_max_block_size()? as usize;
+        let o = acc.stat(path).run().await.unwrap();
+        let reader = SeekableReader::new(acc, path, o.size);
+        let read_buffer_size = self.ctx.get_settings().get_storage_read_buffer_size()?;
+        let reader = BufReader::with_capacity(read_buffer_size as usize, reader);
         let source_params = SourceParams {
-            acc,
+            reader,
             path,
             format: self.plan.format.as_str(),
             schema: self.plan.schema.clone(),
@@ -81,13 +89,17 @@ impl Interpreter for CopyInterpreter {
         };
         let source_stream = SourceStream::new(SourceFactory::try_get(source_params)?);
         let input_stream = source_stream.execute().await?;
+        let progress_stream = Box::pin(ProgressStream::try_create(
+            input_stream,
+            self.ctx.get_scan_progress(),
+        )?);
 
         let r = table
-            .append_data(self.ctx.clone(), input_stream)
+            .append_data(self.ctx.clone(), progress_stream)
             .await?
             .try_collect()
             .await?;
-        table.commit(self.ctx.clone(), r).await?;
+        table.commit_insertion(self.ctx.clone(), r, false).await?;
 
         Ok(Box::pin(DataBlockStream::create(
             self.plan.schema(),
@@ -106,14 +118,22 @@ fn extract_stage_location(path: &str) -> IResult<&str, &str> {
 
 //  this is mock implementation from env
 //  todo: support get the stage config from metadata
-fn get_dal_by_stage(ctx: Arc<QueryContext>, _stage_name: &str) -> Result<Arc<dyn DataAccessor>> {
+async fn get_dal_by_stage(ctx: Arc<QueryContext>, _stage_name: &str) -> Result<DalOperator> {
+    // TODO: we need to check the storage type and get the right dal.
     let conf = ctx.get_config().storage.s3;
 
-    Ok(Arc::new(S3::try_create(
-        &conf.region,
-        &conf.endpoint_url,
-        &conf.bucket,
-        &conf.access_key_id,
-        &conf.secret_access_key,
-    )?))
+    let cred = Credential::hmac(&conf.access_key_id, &conf.secret_access_key);
+
+    let mut builder = s3::Backend::build();
+
+    Ok(DalOperator::new(
+        builder
+            .region(&conf.region)
+            .endpoint(&conf.endpoint_url)
+            .bucket(&conf.bucket)
+            .credential(cred)
+            .finish()
+            .await
+            .unwrap(),
+    ))
 }

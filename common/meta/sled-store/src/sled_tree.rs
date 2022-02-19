@@ -15,16 +15,19 @@
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::Bound;
+use std::ops::Deref;
 use std::ops::RangeBounds;
 
-use common_exception::ErrorCode;
-use common_exception::ToErrorCode;
+use common_meta_types::error_context::WithContext;
+use common_meta_types::MetaStorageError;
+use common_meta_types::MetaStorageResult;
 use common_tracing::tracing;
 use sled::transaction::ConflictableTransactionError;
-use sled::transaction::TransactionError;
+use sled::transaction::TransactionResult;
 use sled::transaction::TransactionalTree;
-use sled::transaction::UnabortableTransactionError;
 
+use crate::sled::transaction::TransactionError;
+use crate::store::Store;
 use crate::SledKeySpace;
 
 /// Extract key from a value of sled tree that includes its key.
@@ -57,7 +60,7 @@ impl SledTree {
         db: &sled::Db,
         tree_name: N,
         sync: bool,
-    ) -> common_exception::Result<Self> {
+    ) -> MetaStorageResult<Self> {
         // During testing, every tree name must be unique.
         if cfg!(test) {
             let x = tree_name.as_ref();
@@ -66,9 +69,7 @@ impl SledTree {
         }
         let t = db
             .open_tree(&tree_name)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("open tree: {}", tree_name)
-            })?;
+            .context(|| format!("open tree: {}", tree_name))?;
 
         tracing::debug!("SledTree opened tree: {}", tree_name);
 
@@ -88,31 +89,86 @@ impl SledTree {
         }
     }
 
-    pub fn txn<T, E>(
+    /// Returns a vec of key-value paris:
+    pub fn export(&self) -> Result<Vec<Vec<Vec<u8>>>, std::io::Error> {
+        let it = self.tree.iter();
+
+        let mut kvs = Vec::new();
+
+        for rkv in it {
+            let (k, v) = rkv?;
+
+            kvs.push(vec![k.to_vec(), v.to_vec()]);
+        }
+
+        Ok(kvs)
+    }
+
+    pub fn txn<T>(
         &self,
         sync: bool,
-        f: impl Fn(TransactionSledTree<'_>) -> Result<T, ConflictableTransactionError<E>>,
-    ) -> Result<T, TransactionError<E>> {
-        // use map_err_to_code
-        (&self.tree).transaction(move |tree| {
+        f: impl Fn(TransactionSledTree<'_>) -> Result<T, MetaStorageError>,
+    ) -> Result<T, MetaStorageError> {
+        let sync = sync && self.sync;
+
+        let result: TransactionResult<T, MetaStorageError> = self.tree.transaction(move |tree| {
             let txn_sled_tree = TransactionSledTree { txn_tree: tree };
-            let r = f(txn_sled_tree.clone())?;
-            if sync {
-                txn_sled_tree.txn_tree.flush();
+            let r = f(txn_sled_tree.clone());
+            match r {
+                Ok(r) => {
+                    if sync {
+                        txn_sled_tree.txn_tree.flush();
+                    }
+                    Ok(r)
+                }
+                Err(meta_sto_err) => {
+                    tracing::warn!("txn error: {:?}", meta_sto_err);
+
+                    match &meta_sto_err {
+                        MetaStorageError::BytesError(_e) => {
+                            Err(ConflictableTransactionError::Abort(meta_sto_err))
+                        }
+                        MetaStorageError::SerdeError(_e) => {
+                            Err(ConflictableTransactionError::Abort(meta_sto_err))
+                        }
+                        MetaStorageError::SledError(_e) => {
+                            Err(ConflictableTransactionError::Abort(meta_sto_err))
+                        }
+                        MetaStorageError::TransactionConflict => {
+                            Err(ConflictableTransactionError::Conflict)
+                        }
+                        MetaStorageError::AppError(_app_err) => {
+                            Err(ConflictableTransactionError::Abort(meta_sto_err))
+                        }
+                        MetaStorageError::SnapshotError(_e) => {
+                            Err(ConflictableTransactionError::Abort(meta_sto_err))
+                        }
+                        MetaStorageError::Damaged(_e) => {
+                            Err(ConflictableTransactionError::Abort(meta_sto_err))
+                        }
+                    }
+                }
             }
-            Ok(r)
-        })
+        });
+
+        match result {
+            Ok(x) => Ok(x),
+            Err(txn_err) => match txn_err {
+                TransactionError::Abort(meta_sto_err) => Err(meta_sto_err),
+                TransactionError::Storage(sto_err) => {
+                    Err(MetaStorageError::SerdeError(sto_err.to_string()))
+                }
+            },
+        }
     }
 
     /// Return true if the tree contains the key.
-    pub fn contains_key<KV: SledKeySpace>(&self, key: &KV::K) -> common_exception::Result<bool>
+    pub fn contains_key<KV: SledKeySpace>(&self, key: &KV::K) -> MetaStorageResult<bool>
     where KV: SledKeySpace {
         let got = self
             .tree
             .contains_key(KV::serialize_key(key)?)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("contains_key: {}:{}", self.name, key)
-            })?;
+            .context(|| format!("contains_key: {}:{}", self.name, key))?;
 
         Ok(got)
     }
@@ -121,7 +177,7 @@ impl SledTree {
         &self,
         key: &KV::K,
         mut f: F,
-    ) -> common_exception::Result<Option<KV::V>>
+    ) -> MetaStorageResult<Option<KV::V>>
     where
         F: FnMut(Option<KV::V>) -> Option<KV::V>,
     {
@@ -132,12 +188,18 @@ impl SledTree {
         let res = self
             .tree
             .update_and_fetch(k, move |old| {
-                let old = old.map(|o| KV::deserialize_value(o).unwrap());
+                let old = match old {
+                    Some(o) => Some(KV::deserialize_value(o).ok()?),
+                    None => None,
+                };
 
                 let new_val = f(old);
-                new_val.map(|new_val| KV::serialize_value(&new_val).unwrap())
+                match new_val {
+                    Some(new_val) => Some(KV::serialize_value(&new_val).ok()?),
+                    None => None,
+                }
             })
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, mes)?;
+            .context(mes)?;
 
         self.flush_async(true).await?;
 
@@ -150,13 +212,11 @@ impl SledTree {
     }
 
     /// Retrieve the value of key.
-    pub fn get<KV: SledKeySpace>(&self, key: &KV::K) -> common_exception::Result<Option<KV::V>> {
+    pub fn get<KV: SledKeySpace>(&self, key: &KV::K) -> MetaStorageResult<Option<KV::V>> {
         let got = self
             .tree
             .get(KV::serialize_key(key)?)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("get: {}:{}", self.name, key)
-            })?;
+            .context(|| format!("get: {}:{}", self.name, key))?;
 
         let v = match got {
             None => None,
@@ -167,7 +227,7 @@ impl SledTree {
     }
 
     /// Retrieve the last key value pair.
-    pub fn last<KV>(&self) -> common_exception::Result<Option<(KV::K, KV::V)>>
+    pub fn last<KV>(&self) -> MetaStorageResult<Option<(KV::K, KV::V)>>
     where KV: SledKeySpace {
         let range = KV::serialize_range(&(Bound::Unbounded::<KV::K>, Bound::Unbounded::<KV::K>))?;
 
@@ -180,7 +240,7 @@ impl SledTree {
             Some(res) => res,
         };
 
-        let last = last.map_err_to_code(ErrorCode::MetaStoreDamaged, || "last")?;
+        let last = last.context(|| "last")?;
 
         let (k, v) = last;
         let key = KV::deserialize_key(k)?;
@@ -189,18 +249,12 @@ impl SledTree {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn remove<KV>(
-        &self,
-        key: &KV::K,
-        flush: bool,
-    ) -> common_exception::Result<Option<KV::V>>
-    where
-        KV: SledKeySpace,
-    {
+    pub async fn remove<KV>(&self, key: &KV::K, flush: bool) -> MetaStorageResult<Option<KV::V>>
+    where KV: SledKeySpace {
         let removed = self
             .tree
             .remove(KV::serialize_key(key)?)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || format!("removed: {}", key,))?;
+            .context(|| format!("remove: {}", key,))?;
 
         self.flush_async(flush).await?;
 
@@ -214,7 +268,7 @@ impl SledTree {
 
     /// Delete kvs that are in `range`.
     #[tracing::instrument(level = "debug", skip(self, range))]
-    pub async fn range_remove<KV, R>(&self, range: R, flush: bool) -> common_exception::Result<()>
+    pub async fn range_remove<KV, R>(&self, range: R, flush: bool) -> MetaStorageResult<()>
     where
         KV: SledKeySpace,
         R: RangeBounds<KV::K>,
@@ -227,17 +281,13 @@ impl SledTree {
         let range_mes = self.range_message::<KV, _>(&range);
 
         for item in self.tree.range(sled_range) {
-            let (k, _) = item.map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("range_remove: {}", range_mes,)
-            })?;
+            let (k, _) = item.context(|| format!("range_remove: {}", range_mes,))?;
             batch.remove(k);
         }
 
         self.tree
             .apply_batch(batch)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("batch remove: {}", range_mes,)
-            })?;
+            .context(|| format!("batch remove: {}", range_mes,))?;
 
         self.flush_async(flush).await?;
 
@@ -245,7 +295,7 @@ impl SledTree {
     }
 
     /// Get keys in `range`
-    pub fn range_keys<KV, R>(&self, range: R) -> common_exception::Result<Vec<KV::K>>
+    pub fn range_keys<KV, R>(&self, range: R) -> MetaStorageResult<Vec<KV::K>>
     where
         KV: SledKeySpace,
         R: RangeBounds<KV::K>,
@@ -257,9 +307,7 @@ impl SledTree {
         // Convert K range into sled::IVec range
         let range = KV::serialize_range(&range)?;
         for item in self.tree.range(range) {
-            let (k, _) = item.map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("range_get: {}", range_mes,)
-            })?;
+            let (k, _) = item.context(|| format!("range_get: {}", range_mes,))?;
 
             let key = KV::deserialize_key(k)?;
             res.push(key);
@@ -269,7 +317,7 @@ impl SledTree {
     }
 
     /// Get key-valuess in `range`
-    pub fn range_kvs<KV, R>(&self, range: R) -> common_exception::Result<Vec<(KV::K, KV::V)>>
+    pub fn range_kvs<KV, R>(&self, range: R) -> MetaStorageResult<Vec<(KV::K, KV::V)>>
     where
         KV: SledKeySpace,
         R: RangeBounds<KV::K>,
@@ -281,9 +329,7 @@ impl SledTree {
         // Convert K range into sled::IVec range
         let range = KV::serialize_range(&range)?;
         for item in self.tree.range(range) {
-            let (k, v) = item.map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("range_get: {}", range_mes,)
-            })?;
+            let (k, v) = item.context(|| format!("range_get: {}", range_mes,))?;
 
             let key = KV::deserialize_key(k)?;
             let value = KV::deserialize_value(v)?;
@@ -297,9 +343,7 @@ impl SledTree {
     pub fn range<KV, R>(
         &self,
         range: R,
-    ) -> common_exception::Result<
-        impl DoubleEndedIterator<Item = common_exception::Result<(KV::K, KV::V)>>,
-    >
+    ) -> MetaStorageResult<impl DoubleEndedIterator<Item = MetaStorageResult<(KV::K, KV::V)>>>
     where
         KV: SledKeySpace,
         R: RangeBounds<KV::K>,
@@ -311,9 +355,7 @@ impl SledTree {
 
         let it = self.tree.range(range);
         let it = it.map(move |item| {
-            let (k, v) = item.map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("range_get: {}", range_mes,)
-            })?;
+            let (k, v) = item.context(|| format!("range_get: {}", range_mes,))?;
 
             let key = KV::deserialize_key(k)?;
             let value = KV::deserialize_value(v)?;
@@ -324,8 +366,8 @@ impl SledTree {
         Ok(it)
     }
 
-    /// Get key-valuess in with the same prefix
-    pub fn scan_prefix<KV>(&self, prefix: &KV::K) -> common_exception::Result<Vec<(KV::K, KV::V)>>
+    /// Get key-values in with the same prefix
+    pub fn scan_prefix<KV>(&self, prefix: &KV::K) -> MetaStorageResult<Vec<(KV::K, KV::V)>>
     where KV: SledKeySpace {
         let mut res = vec![];
 
@@ -333,7 +375,7 @@ impl SledTree {
 
         let pref = KV::serialize_key(prefix)?;
         for item in self.tree.scan_prefix(pref) {
-            let (k, v) = item.map_err_to_code(ErrorCode::MetaStoreDamaged, mes)?;
+            let (k, v) = item.context(mes)?;
 
             let key = KV::deserialize_key(k)?;
             let value = KV::deserialize_value(v)?;
@@ -344,22 +386,20 @@ impl SledTree {
     }
 
     /// Get values of key in `range`
-    pub fn range_values<KV, R>(&self, range: R) -> common_exception::Result<Vec<KV::V>>
+    pub fn range_values<KV, R>(&self, range: R) -> MetaStorageResult<Vec<KV::V>>
     where
         KV: SledKeySpace,
         R: RangeBounds<KV::K>,
     {
         let mut res = vec![];
 
-        let range_mes = self.range_message::<KV, _>(&range);
+        let mes = || format!("range_get: {}", self.range_message::<KV, _>(&range));
 
         // Convert K range into sled::IVec range
         let range = KV::serialize_range(&range)?;
 
         for item in self.tree.range(range) {
-            let (_, v) = item.map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("range_get: {}", range_mes,)
-            })?;
+            let (_, v) = item.context(mes)?;
 
             let ent = KV::deserialize_value(v)?;
             res.push(ent);
@@ -369,7 +409,7 @@ impl SledTree {
     }
 
     /// Append many key-values into SledTree.
-    pub async fn append<KV>(&self, kvs: &[(KV::K, KV::V)]) -> common_exception::Result<()>
+    pub async fn append<KV>(&self, kvs: &[(KV::K, KV::V)]) -> MetaStorageResult<()>
     where KV: SledKeySpace {
         let mut batch = sled::Batch::default();
 
@@ -380,9 +420,7 @@ impl SledTree {
             batch.insert(k, v);
         }
 
-        self.tree
-            .apply_batch(batch)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || "batch append")?;
+        self.tree.apply_batch(batch).context(|| "batch append")?;
 
         self.flush_async(true).await?;
 
@@ -392,7 +430,7 @@ impl SledTree {
     /// Append many values into SledTree.
     /// This could be used in cases the key is included in value and a value should impl trait `IntoKey` to retrieve the key from a value.
     #[tracing::instrument(level = "debug", skip(self, values))]
-    pub async fn append_values<KV>(&self, values: &[KV::V]) -> common_exception::Result<()>
+    pub async fn append_values<KV>(&self, values: &[KV::V]) -> MetaStorageResult<()>
     where
         KV: SledKeySpace,
         KV::V: SledValueToKey<KV::K>,
@@ -410,7 +448,7 @@ impl SledTree {
 
         self.tree
             .apply_batch(batch)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || "batch append_values")?;
+            .context(|| "batch append_values")?;
 
         self.flush_async(true).await?;
 
@@ -419,23 +457,15 @@ impl SledTree {
 
     /// Insert a single kv.
     /// Returns the last value if it is set.
-    async fn insert<KV>(
-        &self,
-        key: &KV::K,
-        value: &KV::V,
-    ) -> common_exception::Result<Option<KV::V>>
-    where
-        KV: SledKeySpace,
-    {
+    async fn insert<KV>(&self, key: &KV::K, value: &KV::V) -> MetaStorageResult<Option<KV::V>>
+    where KV: SledKeySpace {
         let k = KV::serialize_key(key)?;
         let v = KV::serialize_value(value)?;
 
         let prev = self
             .tree
             .insert(k, v)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || {
-                format!("insert_value {}", key)
-            })?;
+            .context(|| format!("insert_value {}", key))?;
 
         let prev = match prev {
             None => None,
@@ -449,7 +479,7 @@ impl SledTree {
 
     /// Insert a single kv, Retrieve the key from value.
     #[tracing::instrument(level = "debug", skip(self, value))]
-    pub async fn insert_value<KV>(&self, value: &KV::V) -> common_exception::Result<Option<KV::V>>
+    pub async fn insert_value<KV>(&self, value: &KV::V) -> MetaStorageResult<Option<KV::V>>
     where
         KV: SledKeySpace,
         KV::V: SledValueToKey<KV::K>,
@@ -474,12 +504,12 @@ impl SledTree {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn flush_async(&self, flush: bool) -> common_exception::Result<()> {
+    async fn flush_async(&self, flush: bool) -> MetaStorageResult<()> {
         if flush && self.sync {
             self.tree
                 .flush_async()
                 .await
-                .map_err_to_code(ErrorCode::MetaStoreDamaged, || "flush sled-tree")?;
+                .context(|| "flust sled-tree")?;
         }
         Ok(())
     }
@@ -497,35 +527,6 @@ impl TransactionSledTree<'_> {
             phantom: PhantomData,
         }
     }
-
-    // fn get<KV: SledKeySpace>(&self, key: &KV::K) -> common_exception::Result<Option<KV::V>> {
-    //     let got = self
-    //         .txn_tree
-    //         .get(KV::serialize_key(key)?)
-    //         .map_err_to_code(ErrorCode::MetaStoreDamaged, || format!("get: {}", key))?;
-    //     let v = match got {
-    //         None => None,
-    //         Some(v) => Some(KV::deserialize_value(v)?),
-    //     };
-    //     Ok(v)
-    // }
-
-    fn insert<KV>(
-        &self,
-        key: &KV::K,
-        value: &KV::V,
-    ) -> Result<Option<KV::V>, UnabortableTransactionError>
-    where
-        KV: SledKeySpace,
-    {
-        let k = KV::serialize_key(key).unwrap();
-        let v = KV::serialize_value(value).unwrap();
-
-        let prev = self.txn_tree.insert(k, v)?;
-        let prev = prev.map(|x| KV::deserialize_value(x).unwrap());
-
-        Ok(prev)
-    }
 }
 
 /// It borrows the internal SledTree with access limited to a specified namespace `KV`.
@@ -539,54 +540,114 @@ pub struct AsTxnKeySpace<'a, KV: SledKeySpace> {
     phantom: PhantomData<KV>,
 }
 
-impl<'a, KV: SledKeySpace> AsTxnKeySpace<'a, KV> {
-    pub fn insert(
-        &self,
-        key: &KV::K,
-        value: &KV::V,
-    ) -> Result<Option<KV::V>, UnabortableTransactionError> {
-        self.inner.insert::<KV>(key, value)
+impl<'a, KV: SledKeySpace> Store<KV> for AsTxnKeySpace<'a, KV> {
+    type Error = MetaStorageError;
+
+    fn insert(&self, key: &KV::K, value: &KV::V) -> Result<Option<KV::V>, Self::Error> {
+        let k = KV::serialize_key(key)?;
+        let v = KV::serialize_value(value)?;
+
+        let prev = self.txn_tree.insert(k, v)?;
+        match prev {
+            Some(v) => Ok(Some(KV::deserialize_value(v)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn get(&self, key: &KV::K) -> Result<Option<KV::V>, Self::Error> {
+        let k = KV::serialize_key(key)?;
+        let got = self.txn_tree.get(k)?;
+
+        match got {
+            Some(v) => Ok(Some(KV::deserialize_value(v)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn remove(&self, key: &KV::K) -> Result<Option<KV::V>, Self::Error> {
+        let k = KV::serialize_key(key)?;
+        let removed = self.txn_tree.remove(k)?;
+
+        match removed {
+            Some(v) => Ok(Some(KV::deserialize_value(v)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn update_and_fetch<F>(&self, key: &KV::K, mut f: F) -> Result<Option<KV::V>, Self::Error>
+    where F: FnMut(Option<KV::V>) -> Option<KV::V> {
+        let key_ivec = KV::serialize_key(key)?;
+
+        let old_val_ivec = self.txn_tree.get(&key_ivec)?;
+        let old_val: Result<Option<KV::V>, MetaStorageError> = match old_val_ivec {
+            Some(v) => Ok(Some(KV::deserialize_value(v)?)),
+            None => Ok(None),
+        };
+
+        let old_val = old_val?;
+
+        let new_val = f(old_val);
+        let _ = match new_val {
+            Some(ref v) => self.txn_tree.insert(key_ivec, KV::serialize_value(v)?)?,
+            None => self.txn_tree.remove(key_ivec)?,
+        };
+
+        Ok(new_val)
+    }
+}
+
+/// Some methods that take `&TransactionSledTree` as parameter need to be called
+/// in subTree method, since subTree(aka: AsTxnKeySpace) already ref to `TransactionSledTree`
+/// we impl deref here to fetch inner `&TransactionSledTree`.
+/// # Example:
+///
+/// ```
+/// fn txn_incr_seq(&self, key: &str, txn_tree: &TransactionSledTree) {}
+///
+/// fn sub_txn_tree_do_update<'s, KS>(
+///     &'s self,
+///     sub_tree: &AsTxnKeySpace<'s, KS>,
+/// ) {
+///     seq_kv_value.seq = self.txn_incr_seq(KS::NAME, &*sub_tree);
+///     sub_tree.insert(key, &seq_kv_value);
+/// }
+/// ```
+impl<'a, KV: SledKeySpace> Deref for AsTxnKeySpace<'a, KV> {
+    type Target = &'a TransactionSledTree<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 impl<'a, KV: SledKeySpace> AsKeySpace<'a, KV> {
-    pub fn contains_key(&self, key: &KV::K) -> common_exception::Result<bool> {
+    pub fn contains_key(&self, key: &KV::K) -> MetaStorageResult<bool> {
         self.inner.contains_key::<KV>(key)
     }
 
-    pub async fn update_and_fetch<F>(
-        &self,
-        key: &KV::K,
-        f: F,
-    ) -> common_exception::Result<Option<KV::V>>
-    where
-        F: FnMut(Option<KV::V>) -> Option<KV::V>,
-    {
+    pub async fn update_and_fetch<F>(&self, key: &KV::K, f: F) -> MetaStorageResult<Option<KV::V>>
+    where F: FnMut(Option<KV::V>) -> Option<KV::V> {
         self.inner.update_and_fetch::<KV, _>(key, f).await
     }
 
-    pub fn get(&self, key: &KV::K) -> common_exception::Result<Option<KV::V>> {
+    pub fn get(&self, key: &KV::K) -> MetaStorageResult<Option<KV::V>> {
         self.inner.get::<KV>(key)
     }
 
-    pub fn last(&self) -> common_exception::Result<Option<(KV::K, KV::V)>> {
+    pub fn last(&self) -> MetaStorageResult<Option<(KV::K, KV::V)>> {
         self.inner.last::<KV>()
     }
 
-    pub async fn remove(
-        &self,
-        key: &KV::K,
-        flush: bool,
-    ) -> common_exception::Result<Option<KV::V>> {
+    pub async fn remove(&self, key: &KV::K, flush: bool) -> MetaStorageResult<Option<KV::V>> {
         self.inner.remove::<KV>(key, flush).await
     }
 
-    pub async fn range_remove<R>(&self, range: R, flush: bool) -> common_exception::Result<()>
+    pub async fn range_remove<R>(&self, range: R, flush: bool) -> MetaStorageResult<()>
     where R: RangeBounds<KV::K> {
         self.inner.range_remove::<KV, R>(range, flush).await
     }
 
-    pub fn range_keys<R>(&self, range: R) -> common_exception::Result<Vec<KV::K>>
+    pub fn range_keys<R>(&self, range: R) -> MetaStorageResult<Vec<KV::K>>
     where R: RangeBounds<KV::K> {
         self.inner.range_keys::<KV, R>(range)
     }
@@ -594,47 +655,41 @@ impl<'a, KV: SledKeySpace> AsKeySpace<'a, KV> {
     pub fn range<R>(
         &self,
         range: R,
-    ) -> common_exception::Result<
-        impl DoubleEndedIterator<Item = common_exception::Result<(KV::K, KV::V)>>,
-    >
+    ) -> MetaStorageResult<impl DoubleEndedIterator<Item = MetaStorageResult<(KV::K, KV::V)>>>
     where
         R: RangeBounds<KV::K>,
     {
         self.inner.range::<KV, R>(range)
     }
 
-    pub fn range_kvs<R>(&self, range: R) -> common_exception::Result<Vec<(KV::K, KV::V)>>
+    pub fn range_kvs<R>(&self, range: R) -> MetaStorageResult<Vec<(KV::K, KV::V)>>
     where R: RangeBounds<KV::K> {
         self.inner.range_kvs::<KV, R>(range)
     }
 
-    pub fn scan_prefix(&self, prefix: &KV::K) -> common_exception::Result<Vec<(KV::K, KV::V)>> {
+    pub fn scan_prefix(&self, prefix: &KV::K) -> MetaStorageResult<Vec<(KV::K, KV::V)>> {
         self.inner.scan_prefix::<KV>(prefix)
     }
 
-    pub fn range_values<R>(&self, range: R) -> common_exception::Result<Vec<KV::V>>
+    pub fn range_values<R>(&self, range: R) -> MetaStorageResult<Vec<KV::V>>
     where R: RangeBounds<KV::K> {
         self.inner.range_values::<KV, R>(range)
     }
 
-    pub async fn append(&self, kvs: &[(KV::K, KV::V)]) -> common_exception::Result<()> {
+    pub async fn append(&self, kvs: &[(KV::K, KV::V)]) -> MetaStorageResult<()> {
         self.inner.append::<KV>(kvs).await
     }
 
-    pub async fn append_values(&self, values: &[KV::V]) -> common_exception::Result<()>
+    pub async fn append_values(&self, values: &[KV::V]) -> MetaStorageResult<()>
     where KV::V: SledValueToKey<KV::K> {
         self.inner.append_values::<KV>(values).await
     }
 
-    pub async fn insert(
-        &self,
-        key: &KV::K,
-        value: &KV::V,
-    ) -> common_exception::Result<Option<KV::V>> {
+    pub async fn insert(&self, key: &KV::K, value: &KV::V) -> MetaStorageResult<Option<KV::V>> {
         self.inner.insert::<KV>(key, value).await
     }
 
-    pub async fn insert_value(&self, value: &KV::V) -> common_exception::Result<Option<KV::V>>
+    pub async fn insert_value(&self, value: &KV::V) -> MetaStorageResult<Option<KV::V>>
     where KV::V: SledValueToKey<KV::K> {
         self.inner.insert_value::<KV>(value).await
     }

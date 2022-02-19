@@ -25,27 +25,20 @@ use common_datablocks::DataBlock;
 use common_datavalues::DataSchemaRef;
 use common_exception::ErrorCode;
 use common_exception::Result;
+use common_meta_types::UserInfo;
+use common_tracing::tracing;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde::Serialize;
+use ExecuteState::*;
 
+use super::http_query::HttpQueryRequest;
+use crate::interpreters::Interpreter;
 use crate::interpreters::InterpreterFactory;
 use crate::sessions::QueryContext;
 use crate::sessions::SessionManager;
 use crate::sessions::SessionRef;
 use crate::sql::PlanParser;
-
-#[derive(Deserialize, Debug)]
-pub struct HttpQueryRequest {
-    #[serde(default)]
-    pub session: SessionConf,
-    pub sql: String,
-}
-
-#[derive(Deserialize, Debug, Default)]
-pub struct SessionConf {
-    pub database: Option<String>,
-}
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
 pub enum ExecuteStateName {
@@ -71,10 +64,6 @@ impl ExecuteState {
     }
 }
 
-use ExecuteState::*;
-
-pub(crate) type ExecutorRef = Arc<RwLock<Executor>>;
-
 pub(crate) struct ExecuteStopped {
     progress: Option<ProgressValues>,
     reason: Result<()>,
@@ -89,7 +78,7 @@ pub(crate) struct Executor {
 impl Executor {
     pub(crate) fn get_progress(&self) -> Option<ProgressValues> {
         match &self.state {
-            Running(r) => Some(r.context.get_progress_value()),
+            Running(r) => Some(r.context.get_scan_progress_value()),
             Stopped(f) => f.progress.clone(),
         }
     }
@@ -99,14 +88,20 @@ impl Executor {
             Stopped(f) => f.stop_time - self.start_time,
         }
     }
-    pub(crate) async fn stop(this: &ExecutorRef, reason: Result<()>, kill: bool) {
+    pub(crate) async fn stop(this: &Arc<RwLock<Executor>>, reason: Result<()>, kill: bool) {
         let mut guard = this.write().await;
         if let Running(r) = &guard.state {
             // release session
-            let progress = Some(r.context.get_progress_value());
+            let progress = Some(r.context.get_scan_progress_value());
             if kill {
                 r.session.force_kill_query();
             }
+            // Write Finish to query log table.
+            let _ = r
+                .interpreter
+                .finish()
+                .await
+                .map_err(|e| tracing::error!("interpreter.finish error: {:?}", e));
             guard.state = Stopped(ExecuteStopped {
                 progress,
                 reason,
@@ -134,37 +129,47 @@ pub(crate) struct ExecuteRunning {
     session: SessionRef,
     // mainly used to get progress for now
     context: Arc<QueryContext>,
+    interpreter: Arc<dyn Interpreter>,
 }
 
 impl ExecuteState {
     pub(crate) async fn try_create(
         request: &HttpQueryRequest,
         session_manager: &Arc<SessionManager>,
+        user_info: &UserInfo,
         block_tx: mpsc::Sender<DataBlock>,
-    ) -> Result<(ExecutorRef, DataSchemaRef)> {
+    ) -> Result<(Arc<RwLock<Executor>>, DataSchemaRef)> {
         let sql = &request.sql;
         let session = session_manager.create_session("http-statement")?;
-        let context = session.create_context().await?;
+        let ctx = session.create_query_context().await?;
         if let Some(db) = &request.session.database {
-            context.set_current_database(db.clone()).await?;
+            ctx.set_current_database(db.clone()).await?;
         };
-        context.attach_query_str(sql);
+        ctx.attach_query_str(sql);
+        session.set_current_user(user_info.clone());
 
-        let plan = PlanParser::parse(sql, context.clone()).await?;
+        let plan = PlanParser::parse(ctx.clone(), sql).await?;
         let schema = plan.schema();
 
-        let interpreter = InterpreterFactory::get(context.clone(), plan.clone())?;
+        let interpreter = InterpreterFactory::get(ctx.clone(), plan.clone())?;
+        // Write Start to query log table.
+        let _ = interpreter
+            .start()
+            .await
+            .map_err(|e| tracing::error!("interpreter.start.error: {:?}", e));
+
         let data_stream = interpreter.execute(None).await?;
-        let mut data_stream = context.try_create_abortable(data_stream)?;
+        let mut data_stream = ctx.try_create_abortable(data_stream)?;
 
         let (abort_tx, mut abort_rx) = mpsc::channel(2);
-        context.attach_http_query(HttpQueryHandle {
+        ctx.attach_http_query(HttpQueryHandle {
             abort_sender: abort_tx,
         });
 
         let running_state = ExecuteRunning {
             session,
-            context: context.clone(),
+            context: ctx.clone(),
+            interpreter: interpreter.clone(),
         };
         let executor = Arc::new(RwLock::new(Executor {
             start_time: Instant::now(),
@@ -172,7 +177,7 @@ impl ExecuteState {
         }));
 
         let executor_clone = executor.clone();
-        context
+        ctx
             .try_spawn(async move {
                 loop {
                     if let Some(block_r) = data_stream.next().await {
@@ -186,7 +191,7 @@ impl ExecuteState {
                             },
                             Err(err) => {
                                 Executor::stop(&executor, Err(err), false).await;
-                                break
+                                break;
                             }
                         };
                     } else {
@@ -194,8 +199,9 @@ impl ExecuteState {
                         break;
                     }
                 }
-                log::debug!("drop block sender!");
+                tracing::debug!("drop block sender!");
             })?;
+
         Ok((executor_clone, schema))
     }
 }

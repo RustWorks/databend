@@ -12,22 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::Infallible;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use async_raft::raft::Entry;
-use async_raft::raft::EntryPayload;
-use async_raft::raft::MembershipConfig;
-use common_exception::prelude::ErrorCode;
-use common_exception::ToErrorCode;
 use common_meta_sled_store::get_sled_db;
+use common_meta_sled_store::openraft;
+use common_meta_sled_store::openraft::EffectiveMembership;
+use common_meta_sled_store::openraft::MessageSummary;
 use common_meta_sled_store::sled;
 use common_meta_sled_store::AsKeySpace;
+use common_meta_sled_store::AsTxnKeySpace;
 use common_meta_sled_store::SledKeySpace;
 use common_meta_sled_store::SledTree;
+use common_meta_sled_store::Store;
+use common_meta_sled_store::TransactionSledTree;
+use common_meta_types::error_context::WithContext;
+use common_meta_types::AppError;
+use common_meta_types::AppliedState;
 use common_meta_types::Change;
 use common_meta_types::Cmd;
 use common_meta_types::DatabaseMeta;
@@ -36,16 +39,23 @@ use common_meta_types::LogEntry;
 use common_meta_types::LogId;
 use common_meta_types::MatchSeq;
 use common_meta_types::MatchSeqExt;
+use common_meta_types::MetaError;
+use common_meta_types::MetaResult;
+use common_meta_types::MetaStorageError;
+use common_meta_types::MetaStorageResult;
 use common_meta_types::Node;
 use common_meta_types::NodeId;
 use common_meta_types::Operation;
 use common_meta_types::SeqV;
 use common_meta_types::TableMeta;
+use common_meta_types::UnknownDatabase;
+use common_meta_types::UnknownDatabaseId;
+use common_meta_types::UnknownTableId;
 use common_tracing::tracing;
+use openraft::raft::Entry;
+use openraft::raft::EntryPayload;
 use serde::Deserialize;
 use serde::Serialize;
-use sled::transaction::ConflictableTransactionError;
-use sled::transaction::TransactionError;
 use sled::IVec;
 
 use crate::config::RaftConfig;
@@ -58,8 +68,8 @@ use crate::sled_key_spaces::Sequences;
 use crate::sled_key_spaces::StateMachineMeta;
 use crate::sled_key_spaces::TableLookup;
 use crate::sled_key_spaces::Tables;
-use crate::state_machine::AppliedState;
 use crate::state_machine::ClientLastRespValue;
+use crate::state_machine::DatabaseLookupKey;
 use crate::state_machine::StateMachineMetaKey;
 use crate::state_machine::StateMachineMetaKey::Initialized;
 use crate::state_machine::StateMachineMetaKey::LastApplied;
@@ -85,13 +95,6 @@ const TREE_STATE_MACHINE: &str = "state_machine";
 /// `last_applied_logs` and `client_serial_responses` to achieve idempotence.
 #[derive(Debug)]
 pub struct StateMachine {
-    // TODO(xp): config is not required. Remove it after snapshot is done.
-    _config: RaftConfig,
-
-    /// The dedicated sled db to store everything about a state machine.
-    /// A state machine has several trees opened on this db.
-    _db: sled::Db,
-
     /// The internal sled::Tree to store everything about a state machine:
     /// - Store initialization state and last applied in keyspace `StateMachineMeta`.
     /// - Every other state is store in its own keyspace such as `Nodes`.
@@ -126,32 +129,27 @@ impl StateMachine {
     }
 
     #[tracing::instrument(level = "debug", skip(config), fields(config_id=config.config_id.as_str()))]
-    pub fn clean(config: &RaftConfig, sm_id: u64) -> common_exception::Result<()> {
+    pub fn clean(config: &RaftConfig, sm_id: u64) -> Result<(), MetaStorageError> {
         let tree_name = StateMachine::tree_name(config, sm_id);
 
         let db = get_sled_db();
 
         // it blocks and slow
         db.drop_tree(tree_name)
-            .map_err_to_code(ErrorCode::MetaStoreDamaged, || "drop prev state machine")?;
+            .context(|| "drop prev state machine")?;
 
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip(config), fields(config_id=config.config_id.as_str()))]
-    pub async fn open(config: &RaftConfig, sm_id: u64) -> common_exception::Result<StateMachine> {
+    pub async fn open(config: &RaftConfig, sm_id: u64) -> Result<StateMachine, MetaStorageError> {
         let db = get_sled_db();
 
         let tree_name = StateMachine::tree_name(config, sm_id);
 
         let sm_tree = SledTree::open(&db, &tree_name, config.is_sync())?;
 
-        let sm = StateMachine {
-            _config: config.clone(),
-            _db: db,
-
-            sm_tree,
-        };
+        let sm = StateMachine { sm_tree };
 
         let inited = {
             let sm_meta = sm.sm_meta();
@@ -177,17 +175,17 @@ impl StateMachine {
     /// - and a snapshot id
     pub fn snapshot(
         &self,
-    ) -> common_exception::Result<(
+    ) -> MetaStorageResult<(
         impl Iterator<Item = sled::Result<(IVec, IVec)>>,
         LogId,
-        MembershipConfig,
         String,
     )> {
         let last_applied = self.get_last_applied()?;
-        let mem = self.get_membership()?;
 
         // NOTE: An initialize node/cluster always has the first log contains membership config.
-        let mem = mem.unwrap_or_default();
+
+        let last_applied =
+            last_applied.expect("not allowed to build snapshot with empty state machine");
 
         let snapshot_idx = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -199,7 +197,7 @@ impl StateMachine {
             last_applied.term, last_applied.index, snapshot_idx
         );
 
-        Ok((self.sm_tree.tree.iter(), last_applied, mem, snapshot_id))
+        Ok((self.sm_tree.tree.iter(), last_applied, snapshot_id))
     }
 
     /// Serialize a snapshot for transport.
@@ -207,10 +205,10 @@ impl StateMachine {
     /// no matter if there are other writes applied to the tree.
     pub fn serialize_snapshot(
         view: impl Iterator<Item = sled::Result<(IVec, IVec)>>,
-    ) -> common_exception::Result<Vec<u8>> {
+    ) -> MetaStorageResult<Vec<u8>> {
         let mut kvs = Vec::new();
         for rkv in view {
-            let (k, v) = rkv.map_err_to_code(ErrorCode::MetaStoreDamaged, || "taking snapshot")?;
+            let (k, v) = rkv.context(|| "taking snapshot")?;
             kvs.push(vec![k.to_vec(), v.to_vec()]);
         }
         let snap = SerializableSnapshot { kvs };
@@ -223,7 +221,7 @@ impl StateMachine {
     /// a unique id such as Cmd::AddDatabase which needs make a new database id.
     ///
     /// Note: this can only be called inside apply().
-    async fn incr_seq(&self, key: &str) -> common_exception::Result<u64> {
+    async fn incr_seq(&self, key: &str) -> MetaResult<u64> {
         let sequences = self.sequences();
 
         let curr = sequences
@@ -242,65 +240,396 @@ impl StateMachine {
     /// If a duplicated log entry is detected by checking data.txid, no update
     /// will be made and the previous resp is returned. In this way a client is able to re-send a
     /// command safely in case of network failure etc.
-    #[tracing::instrument(level = "trace", skip(self))]
-    pub async fn apply(&self, entry: &Entry<LogEntry>) -> common_exception::Result<AppliedState> {
-        // TODO(xp): all update need to be done in a tx.
+    #[tracing::instrument(level = "debug", skip(self, entry), fields(log_id=%entry.log_id))]
+    pub async fn apply(&self, entry: &Entry<LogEntry>) -> Result<AppliedState, MetaStorageError> {
+        tracing::debug!("apply: summary: {}", entry.summary());
+        tracing::debug!("apply: payload: {:?}", entry.payload);
 
         let log_id = &entry.log_id;
 
-        let sm_meta = self.sm_meta();
+        tracing::debug!("sled tx start: {:?}", entry);
 
-        // use `Infallible` here cause Sled make it infallible
-        // ref: https://github.com/datafuse-extras/sled/blob/43fa7250d3c6f4964167c9498b622f2923289cf3/src/transaction.rs#L235
-        let r: Result<Option<StateMachineMetaValue>, TransactionError<Infallible>> =
-            self.sm_tree.txn(true, move |t| {
-                let txn_sm_meta = t.key_space::<StateMachineMeta>();
-                txn_sm_meta
-                    .insert(&LastApplied, &StateMachineMetaValue::LogId(*log_id))
-                    .map_err(|e| {
-                        let err: ConflictableTransactionError<Infallible> =
-                            ConflictableTransactionError::from(e);
-                        err
-                    })
-            });
-        match r {
-            Ok(_) => (),
-            Err(e) => return Err(ErrorCode::from(e)),
-        }
+        let result = self.sm_tree.txn(true, move |txn_tree| {
+            let txn_sm_meta = txn_tree.key_space::<StateMachineMeta>();
+            txn_sm_meta.insert(&LastApplied, &StateMachineMetaValue::LogId(*log_id))?;
 
-        match entry.payload {
-            EntryPayload::Blank => {}
-            EntryPayload::Normal(ref norm) => {
-                let data = &norm.data;
-                if let Some(ref txid) = data.txid {
-                    if let Some((serial, resp)) = self.get_client_last_resp(&txid.client)? {
+            match entry.payload {
+                EntryPayload::Blank => {}
+                EntryPayload::Normal(ref data) => {
+                    if let Some(ref txid) = data.txid {
+                        let (serial, resp) =
+                            self.txn_get_client_last_resp(&txid.client, &txn_tree)?;
                         if serial == txid.serial {
-                            return Ok(resp);
+                            return Ok(Some(resp));
                         }
                     }
-                }
 
-                let resp = self.apply_cmd(&data.cmd).await?;
+                    let res = self.apply_cmd(&data.cmd, &txn_tree);
+                    let applied_state = res?;
 
-                if let Some(ref txid) = data.txid {
-                    self.client_last_resp_update(&txid.client, (txid.serial, resp.clone()))
-                        .await?;
+                    if let Some(ref txid) = data.txid {
+                        self.txn_client_last_resp_update(
+                            &txid.client,
+                            (txid.serial, applied_state.clone()),
+                            &txn_tree,
+                        )?;
+                    }
+                    return Ok(Some(applied_state));
                 }
-                return Ok(resp);
-            }
-            EntryPayload::ConfigChange(ref mem) => {
-                sm_meta
-                    .insert(
+                EntryPayload::Membership(ref mem) => {
+                    txn_sm_meta.insert(
                         &LastMembership,
-                        &StateMachineMetaValue::Membership(mem.membership.clone()),
-                    )
-                    .await?;
-                return Ok(AppliedState::None);
+                        &StateMachineMetaValue::Membership(EffectiveMembership {
+                            log_id: *log_id,
+                            membership: mem.clone(),
+                        }),
+                    )?;
+                    return Ok(Some(AppliedState::None));
+                }
+            };
+
+            Ok(None)
+        });
+
+        let opt_applied_state = match result {
+            Ok(x) => x,
+            Err(meta_sto_err) => {
+                return match meta_sto_err {
+                    MetaStorageError::AppError(app_err) => Ok(AppliedState::AppError(app_err)),
+                    _ => Err(meta_sto_err),
+                }
             }
-            EntryPayload::SnapshotPointer(_) => {}
         };
 
-        Ok(AppliedState::None)
+        tracing::debug!("sled tx done: {:?}", entry);
+
+        let applied_state = match opt_applied_state {
+            Some(r) => r,
+            None => AppliedState::None,
+        };
+
+        Ok(applied_state)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_incr_seq_cmd(
+        &self,
+        key: &str,
+
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let r = self.txn_incr_seq(key, txn_tree)?;
+
+        Ok(r.into())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_add_node_cmd(
+        &self,
+        node_id: &u64,
+        node: &Node,
+
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let sm_nodes = txn_tree.key_space::<Nodes>();
+
+        let prev = sm_nodes.get(node_id)?;
+
+        if prev.is_some() {
+            Ok((prev, None).into())
+        } else {
+            sm_nodes.insert(node_id, node)?;
+            tracing::info!("applied AddNode: {}={:?}", node_id, node);
+            Ok((prev, Some(node.clone())).into())
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_create_database_cmd(
+        &self,
+        tenant: &str,
+        name: &str,
+        meta: &DatabaseMeta,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let db_id = self.txn_incr_seq(SEQ_DATABASE_ID, txn_tree)?;
+
+        let db_lookup_tree = txn_tree.key_space::<DatabaseLookup>();
+
+        let (prev, result) = self.txn_sub_tree_upsert(
+            &db_lookup_tree,
+            &DatabaseLookupKey::new(tenant.to_string(), name.to_string()),
+            &MatchSeq::Exact(0),
+            Operation::Update(db_id),
+            None,
+        )?;
+
+        // if it is just created
+        if prev.is_none() && result.is_some() {
+            // TODO(xp): reconsider this impl. it may not be required.
+            self.txn_incr_seq(SEQ_DATABASE_META_ID, txn_tree)?;
+        } else {
+            // exist
+            let db_id = prev.unwrap().data;
+            let prev = self.txn_get_database_meta_by_id(&db_id, txn_tree)?;
+            if let Some(prev) = prev {
+                return Ok(AppliedState::DatabaseMeta(Change::nochange_with_id(
+                    db_id,
+                    Some(prev),
+                )));
+            }
+        }
+
+        let dbs = txn_tree.key_space::<Databases>();
+        let (prev_meta, result_meta) = self.txn_sub_tree_upsert(
+            &dbs,
+            &db_id,
+            &MatchSeq::Exact(0),
+            Operation::Update(meta.clone()),
+            None,
+        )?;
+
+        if prev_meta.is_none() && result_meta.is_some() {
+            self.txn_incr_seq(SEQ_DATABASE_META_ID, txn_tree)?;
+        }
+
+        tracing::debug!(
+            "applied create Database: {}, db_id: {}, meta: {:?}",
+            name,
+            db_id,
+            result
+        );
+
+        Ok(AppliedState::DatabaseMeta(Change::new_with_id(
+            db_id,
+            prev_meta,
+            result_meta,
+        )))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_drop_database_cmd(
+        &self,
+        tenant: &str,
+        name: &str,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let dbs = txn_tree.key_space::<DatabaseLookup>();
+
+        let (prev, result) = self.txn_sub_tree_upsert(
+            &dbs,
+            &DatabaseLookupKey::new(tenant.to_string(), name.to_string()),
+            &MatchSeq::Any,
+            Operation::Delete,
+            None,
+        )?;
+
+        assert!(
+            result.is_none(),
+            "delete with MatchSeq::Any always succeeds"
+        );
+
+        // if it is just deleted
+        if let Some(seq_db_id) = prev {
+            // TODO(xp): reconsider this impl. it may not be required.
+            self.txn_incr_seq(SEQ_DATABASE_META_ID, txn_tree)?;
+
+            let db_id = seq_db_id.data;
+
+            let dbs = txn_tree.key_space::<Databases>();
+            let (prev_meta, result_meta) =
+                self.txn_sub_tree_upsert(&dbs, &db_id, &MatchSeq::Any, Operation::Delete, None)?;
+
+            tracing::debug!("applied drop Database: {} {:?}", name, result);
+
+            return Ok(AppliedState::DatabaseMeta(Change::new_with_id(
+                db_id,
+                prev_meta,
+                result_meta,
+            )));
+        }
+
+        // not exist
+
+        tracing::debug!("applied drop Database: {} {:?}", name, result);
+        Ok(AppliedState::DatabaseMeta(Change::new(None, None)))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_create_table_cmd(
+        &self,
+        tenant: &str,
+        db_name: &str,
+        table_name: &str,
+        table_meta: &TableMeta,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let db_id = self.txn_get_database_id(tenant, db_name, txn_tree)?;
+
+        let lookup_key = TableLookupKey {
+            database_id: db_id,
+            table_name: table_name.to_string(),
+        };
+
+        let table_lookup_tree = txn_tree.key_space::<TableLookup>();
+        let seq_table_id = table_lookup_tree.get(&lookup_key)?;
+
+        if let Some(u) = seq_table_id {
+            let table_id = u.data.0;
+
+            let prev = self.txn_get_table_meta_by_id(&table_id, txn_tree)?;
+
+            return Ok(AppliedState::TableMeta(Change::nochange_with_id(
+                table_id, prev,
+            )));
+        }
+
+        let table_meta = table_meta.clone();
+        let table_id = self.txn_incr_seq(SEQ_TABLE_ID, txn_tree)?;
+
+        self.txn_sub_tree_upsert(
+            &table_lookup_tree,
+            &lookup_key,
+            &MatchSeq::Exact(0),
+            Operation::Update(TableLookupValue(table_id)),
+            None,
+        )?;
+
+        let table_tree = txn_tree.key_space::<Tables>();
+        let (prev, result) = self.txn_sub_tree_upsert(
+            &table_tree,
+            &table_id,
+            &MatchSeq::Exact(0),
+            Operation::Update(table_meta),
+            None,
+        )?;
+
+        tracing::debug!("applied create Table: {}={:?}", table_name, result);
+
+        if prev.is_none() && result.is_some() {
+            self.txn_incr_seq(SEQ_DATABASE_META_ID, txn_tree)?;
+        }
+
+        Ok(AppliedState::TableMeta(Change::new_with_id(
+            table_id, prev, result,
+        )))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_drop_table_cmd(
+        &self,
+        tenant: &str,
+        db_name: &str,
+        table_name: &str,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let db_id = self.txn_get_database_id(tenant, db_name, txn_tree)?;
+
+        let lookup_key = TableLookupKey {
+            database_id: db_id,
+            table_name: table_name.to_string(),
+        };
+
+        let table_lookup_tree = txn_tree.key_space::<TableLookup>();
+        let seq_table_id = table_lookup_tree.get(&lookup_key)?;
+
+        if seq_table_id.is_none() {
+            return Ok(Change::<TableMeta>::new(None, None).into());
+        }
+
+        let table_id = seq_table_id.unwrap().data.0;
+
+        self.txn_sub_tree_upsert(
+            &table_lookup_tree,
+            &lookup_key,
+            &MatchSeq::Any,
+            Operation::Delete,
+            None,
+        )?;
+
+        let tables = txn_tree.key_space::<Tables>();
+        let (prev, result) =
+            self.txn_sub_tree_upsert(&tables, &table_id, &MatchSeq::Any, Operation::Delete, None)?;
+        if prev.is_some() && result.is_none() {
+            self.txn_incr_seq(SEQ_DATABASE_META_ID, txn_tree)?;
+        }
+        tracing::debug!("applied drop Table: {} {:?}", table_name, result);
+        Ok(Change::new_with_id(table_id, prev, result).into())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_update_kv_cmd(
+        &self,
+        key: &str,
+        seq: &MatchSeq,
+        value_op: &Operation<Vec<u8>>,
+        value_meta: &Option<KVMeta>,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let sub_tree = txn_tree.key_space::<GenericKV>();
+        let (prev, result) = self.txn_sub_tree_upsert(
+            &sub_tree,
+            &key.to_string(),
+            seq,
+            value_op.clone(),
+            value_meta.clone(),
+        )?;
+
+        tracing::debug!("applied UpsertKV: {} {:?}", key, result);
+        Ok(Change::new(prev, result).into())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, txn_tree))]
+    fn apply_upsert_table_options_cmd(
+        &self,
+        req: &common_meta_types::UpsertTableOptionReq,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
+        let table_tree = txn_tree.key_space::<Tables>();
+        let prev = table_tree.get(&req.table_id)?;
+
+        // Unlike other Cmd, prev to be None is not allowed for upsert-options.
+        let prev = prev.ok_or_else(|| {
+            MetaStorageError::AppError(AppError::UnknownTableId(UnknownTableId::new(
+                req.table_id,
+                "apply_upsert_table_options_cmd".to_string(),
+            )))
+        })?;
+
+        if req.seq.match_seq(&prev).is_err() {
+            let res = AppliedState::TableMeta(Change::new(Some(prev.clone()), Some(prev)));
+            return Ok(res);
+        }
+
+        let meta = prev.meta.clone();
+        let mut table_meta = prev.data.clone();
+        let opts = &mut table_meta.options;
+
+        for (k, opt_v) in &req.options {
+            match opt_v {
+                None => {
+                    opts.remove(k);
+                }
+                Some(v) => {
+                    opts.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let new_seq = self.txn_incr_seq(Tables::NAME, txn_tree)?;
+        let sv = SeqV {
+            seq: new_seq,
+            meta,
+            data: table_meta,
+        };
+
+        table_tree.insert(&req.table_id, &sv)?;
+
+        Ok(AppliedState::TableMeta(Change::new_with_id(
+            req.table_id,
+            Some(prev),
+            Some(sv),
+        )))
     }
 
     /// Apply a `Cmd` to state machine.
@@ -308,285 +637,54 @@ impl StateMachine {
     /// Already applied log should be filtered out before passing into this function.
     /// This is the only entry to modify state machine.
     /// The `cmd` is always committed by raft before applying.
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn apply_cmd(&self, cmd: &Cmd) -> common_exception::Result<AppliedState> {
+    #[tracing::instrument(level = "debug", skip(self, cmd, txn_tree))]
+    pub fn apply_cmd(
+        &self,
+        cmd: &Cmd,
+        txn_tree: &TransactionSledTree,
+    ) -> Result<AppliedState, MetaStorageError> {
+        tracing::debug!("apply_cmd: {:?}", cmd);
+
         match cmd {
-            Cmd::IncrSeq { ref key } => Ok(self.incr_seq(key).await?.into()),
+            Cmd::IncrSeq { ref key } => self.apply_incr_seq_cmd(key, txn_tree),
 
             Cmd::AddNode {
                 ref node_id,
                 ref node,
-            } => {
-                let sm_nodes = self.nodes();
-
-                let prev = sm_nodes.get(node_id)?;
-
-                if prev.is_some() {
-                    Ok((prev, None).into())
-                } else {
-                    sm_nodes.insert(node_id, node).await?;
-                    tracing::info!("applied AddNode: {}={:?}", node_id, node);
-                    Ok((prev, Some(node.clone())).into())
-                }
-            }
+            } => self.apply_add_node_cmd(node_id, node, txn_tree),
 
             Cmd::CreateDatabase {
+                ref tenant,
                 ref name,
-                ref engine,
-            } => {
-                let db_id = self.incr_seq(SEQ_DATABASE_ID).await?;
+                ref meta,
+            } => self.apply_create_database_cmd(tenant, name, meta, txn_tree),
 
-                let db_lookup_tree = self.database_lookup();
-
-                let (prev, result) = self
-                    .sub_tree_upsert(
-                        db_lookup_tree,
-                        name,
-                        &MatchSeq::Exact(0),
-                        Operation::Update(db_id),
-                        None,
-                    )
-                    .await?;
-
-                // if it is just created
-                if prev.is_none() && result.is_some() {
-                    // TODO(xp): reconsider this impl. it may not be required.
-                    self.incr_seq(SEQ_DATABASE_META_ID).await?;
-                } else {
-                    // exist
-                    let db_id = prev.unwrap().data;
-                    let prev = self.get_database_meta_by_id(&db_id)?;
-                    return Ok(AppliedState::DatabaseMeta(Change::nochange_with_id(
-                        db_id,
-                        Some(prev),
-                    )));
-                }
-
-                let dbs = self.databases();
-                let (prev_meta, result_meta) = self
-                    .sub_tree_upsert(
-                        dbs,
-                        &db_id,
-                        &MatchSeq::Exact(0),
-                        Operation::Update(DatabaseMeta {
-                            engine: engine.clone(),
-                        }),
-                        None,
-                    )
-                    .await?;
-
-                if prev_meta.is_none() && result_meta.is_some() {
-                    self.incr_seq(SEQ_DATABASE_META_ID).await?;
-                }
-
-                tracing::debug!(
-                    "applied create Database: {}, db_id: {}, meta: {:?}",
-                    name,
-                    db_id,
-                    result
-                );
-
-                Ok(AppliedState::DatabaseMeta(Change::new_with_id(
-                    db_id,
-                    prev_meta,
-                    result_meta,
-                )))
-            }
-
-            Cmd::DropDatabase { ref name } => {
-                let dbs = self.database_lookup();
-
-                let (prev, result) = self
-                    .sub_tree_upsert(dbs, name, &MatchSeq::Any, Operation::Delete, None)
-                    .await?;
-
-                assert!(
-                    result.is_none(),
-                    "delete with MatchSeq::Any always succeeds"
-                );
-
-                // if it is just deleted
-                if let Some(seq_db_id) = prev {
-                    // TODO(xp): reconsider this impl. it may not be required.
-                    self.incr_seq(SEQ_DATABASE_META_ID).await?;
-
-                    let db_id = seq_db_id.data;
-
-                    let dbs = self.databases();
-                    let (prev_meta, result_meta) = self
-                        .sub_tree_upsert(dbs, &db_id, &MatchSeq::Any, Operation::Delete, None)
-                        .await?;
-
-                    tracing::debug!("applied drop Database: {} {:?}", name, result);
-
-                    return Ok(AppliedState::DatabaseMeta(Change::new_with_id(
-                        db_id,
-                        prev_meta,
-                        result_meta,
-                    )));
-                }
-
-                // not exist
-
-                tracing::debug!("applied drop Database: {} {:?}", name, result);
-                Ok(AppliedState::DatabaseMeta(Change::new(None, None)))
-            }
+            Cmd::DropDatabase {
+                ref tenant,
+                ref name,
+            } => self.apply_drop_database_cmd(tenant, name, txn_tree),
 
             Cmd::CreateTable {
+                ref tenant,
                 ref db_name,
                 ref table_name,
                 ref table_meta,
-            } => {
-                let db_id = self.get_database_id(db_name)?;
-
-                let lookup_key = TableLookupKey {
-                    database_id: db_id,
-                    table_name: table_name.to_string(),
-                };
-
-                let table_lookup_tree = self.table_lookup();
-                let seq_table_id = table_lookup_tree.get(&lookup_key)?;
-
-                if let Some(u) = seq_table_id {
-                    let table_id = u.data.0;
-
-                    let prev = self.get_table_meta_by_id(&table_id)?;
-
-                    return Ok(AppliedState::TableMeta(Change::nochange_with_id(
-                        table_id, prev,
-                    )));
-                }
-
-                let table_meta = table_meta.clone();
-                let table_id = self.incr_seq(SEQ_TABLE_ID).await?;
-
-                self.sub_tree_upsert(
-                    table_lookup_tree,
-                    &lookup_key,
-                    &MatchSeq::Exact(0),
-                    Operation::Update(TableLookupValue(table_id)),
-                    None,
-                )
-                .await?;
-
-                let (prev, result) = self
-                    .sub_tree_upsert(
-                        self.tables(),
-                        &table_id,
-                        &MatchSeq::Exact(0),
-                        Operation::Update(table_meta),
-                        None,
-                    )
-                    .await?;
-
-                tracing::debug!("applied create Table: {}={:?}", table_name, result);
-
-                if prev.is_none() && result.is_some() {
-                    self.incr_seq(SEQ_DATABASE_META_ID).await?;
-                }
-
-                Ok(AppliedState::TableMeta(Change::new_with_id(
-                    table_id, prev, result,
-                )))
-            }
+            } => self.apply_create_table_cmd(tenant, db_name, table_name, table_meta, txn_tree),
 
             Cmd::DropTable {
+                tenant,
                 ref db_name,
                 ref table_name,
-            } => {
-                let db_id = self.get_database_id(db_name)?;
-
-                let lookup_key = TableLookupKey {
-                    database_id: db_id,
-                    table_name: table_name.to_string(),
-                };
-
-                let table_lookup_tree = self.table_lookup();
-                let seq_table_id = table_lookup_tree.get(&lookup_key)?;
-
-                if seq_table_id.is_none() {
-                    return Ok(Change::<TableMeta>::new(None, None).into());
-                }
-
-                let table_id = seq_table_id.unwrap().data.0;
-
-                self.sub_tree_upsert(
-                    table_lookup_tree,
-                    &lookup_key,
-                    &MatchSeq::Any,
-                    Operation::Delete,
-                    None,
-                )
-                .await?;
-
-                let tables = self.tables();
-                let (prev, result) = self
-                    .sub_tree_upsert(tables, &table_id, &MatchSeq::Any, Operation::Delete, None)
-                    .await?;
-                if prev.is_some() && result.is_none() {
-                    self.incr_seq(SEQ_DATABASE_META_ID).await?;
-                }
-                tracing::debug!("applied drop Table: {} {:?}", table_name, result);
-                Ok(Change::new_with_id(table_id, prev, result).into())
-            }
+            } => self.apply_drop_table_cmd(tenant, db_name, table_name, txn_tree),
 
             Cmd::UpsertKV {
                 key,
                 seq,
                 value: value_op,
                 value_meta,
-            } => {
-                let (prev, result) = self
-                    .sub_tree_upsert(self.kvs(), key, seq, value_op.clone(), value_meta.clone())
-                    .await?;
+            } => self.apply_update_kv_cmd(key, seq, value_op, value_meta, txn_tree),
 
-                tracing::debug!("applied UpsertKV: {} {:?}", key, result);
-                Ok(Change::new(prev, result).into())
-            }
-
-            Cmd::UpsertTableOptions(ref req) => {
-                let prev = self.tables().get(&req.table_id)?;
-
-                // Unlike other Cmd, prev to be None is not allowed for upsert-options.
-                let prev = prev.ok_or_else(|| {
-                    ErrorCode::UnknownTableId(format!("table_id:{}", req.table_id))
-                })?;
-
-                if req.seq.match_seq(&prev).is_err() {
-                    let res = AppliedState::TableMeta(Change::new(Some(prev.clone()), Some(prev)));
-                    return Ok(res);
-                }
-
-                let meta = prev.meta.clone();
-                let mut table_meta = prev.data.clone();
-                let opts = &mut table_meta.options;
-
-                for (k, opt_v) in &req.options {
-                    match opt_v {
-                        None => {
-                            opts.remove(k);
-                        }
-                        Some(v) => {
-                            opts.insert(k.to_string(), v.to_string());
-                        }
-                    }
-                }
-
-                let new_seq = self.incr_seq(Tables::NAME).await?;
-                let sv = SeqV {
-                    seq: new_seq,
-                    meta,
-                    data: table_meta,
-                };
-
-                self.tables().insert(&req.table_id, &sv).await?;
-
-                Ok(AppliedState::TableMeta(Change::new_with_id(
-                    req.table_id,
-                    Some(prev),
-                    Some(sv),
-                )))
-            }
+            Cmd::UpsertTableOptions(ref req) => self.apply_upsert_table_options_cmd(req, txn_tree),
         }
     }
 
@@ -597,7 +695,7 @@ impl StateMachine {
         seq: &MatchSeq,
         value_op: Operation<V>,
         value_meta: Option<KVMeta>,
-    ) -> common_exception::Result<(Option<SeqV<V>>, Option<SeqV<V>>)>
+    ) -> MetaResult<(Option<SeqV<V>>, Option<SeqV<V>>)>
     where
         V: Clone + Debug,
         KS: SledKeySpace<V = SeqV<V>>,
@@ -622,9 +720,6 @@ impl StateMachine {
         Ok((prev, result))
     }
 
-    /// Update a record into a sled tree sub tree, defined by a KeySpace, without seq check.
-    ///
-    /// TODO(xp); this should be a method of sled sub tree
     async fn sub_tree_do_update<'s, V, KS>(
         &'s self,
         sub_tree: &AsKeySpace<'s, KS>,
@@ -632,7 +727,7 @@ impl StateMachine {
         prev: Option<SeqV<V>>,
         value_meta: Option<KVMeta>,
         value_op: Operation<V>,
-    ) -> common_exception::Result<Option<SeqV<V>>>
+    ) -> MetaResult<Option<SeqV<V>>>
     where
         V: Clone + Debug,
         KS: SledKeySpace<V = SeqV<V>>,
@@ -658,32 +753,127 @@ impl StateMachine {
         Ok(Some(seq_kv_value))
     }
 
-    #[allow(clippy::ptr_arg)]
-    pub fn get_database_id(&self, db_name: &String) -> common_exception::Result<u64> {
+    fn txn_incr_seq(&self, key: &str, txn_tree: &TransactionSledTree) -> MetaStorageResult<u64> {
+        let seq_sub_tree = txn_tree.key_space::<Sequences>();
+
+        let key = key.to_string();
+        let curr = seq_sub_tree.update_and_fetch(&key, |old| Some(old.unwrap_or_default() + 1))?;
+        let curr = curr.unwrap();
+
+        tracing::debug!("applied IncrSeq: {}={}", key, curr);
+
+        Ok(curr.0)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn txn_sub_tree_upsert<'s, V, KS>(
+        &'s self,
+        sub_tree: &AsTxnKeySpace<'s, KS>,
+        key: &KS::K,
+        seq: &MatchSeq,
+        value_op: Operation<V>,
+        value_meta: Option<KVMeta>,
+    ) -> MetaStorageResult<(Option<SeqV<V>>, Option<SeqV<V>>)>
+    where
+        V: Clone + Debug,
+        KS: SledKeySpace<V = SeqV<V>>,
+    {
+        let prev = sub_tree.get(key)?;
+
+        // If prev is timed out, treat it as a None.
+        let prev = Self::unexpired_opt(prev);
+
+        if seq.match_seq(&prev).is_err() {
+            return Ok((prev.clone(), prev));
+        }
+
+        // result is the state after applying an operation.
+        let result =
+            self.txn_sub_tree_do_update(sub_tree, key, prev.clone(), value_meta, value_op)?;
+
+        tracing::debug!("applied upsert: {} {:?}", key, result);
+        Ok((prev, result))
+    }
+
+    /// Update a record into a sled tree sub tree, defined by a KeySpace, without seq check.
+    ///
+    /// TODO(xp); this should be a method of sled sub tree
+    fn txn_sub_tree_do_update<'s, V, KS>(
+        &'s self,
+        sub_tree: &AsTxnKeySpace<'s, KS>,
+        key: &KS::K,
+        prev: Option<SeqV<V>>,
+        value_meta: Option<KVMeta>,
+        value_op: Operation<V>,
+    ) -> MetaStorageResult<Option<SeqV<V>>>
+    where
+        V: Clone + Debug,
+        KS: SledKeySpace<V = SeqV<V>>,
+    {
+        let mut seq_kv_value = match value_op {
+            Operation::Update(v) => SeqV::with_meta(0, value_meta, v),
+            Operation::Delete => {
+                sub_tree.remove(key)?;
+                return Ok(None);
+            }
+            Operation::AsIs => match prev {
+                None => return Ok(None),
+                Some(ref prev_kv_value) => prev_kv_value.clone().set_meta(value_meta),
+            },
+        };
+
+        seq_kv_value.seq = self.txn_incr_seq(KS::NAME, sub_tree)?;
+
+        sub_tree.insert(key, &seq_kv_value)?;
+
+        Ok(Some(seq_kv_value))
+    }
+
+    pub fn get_database_id(&self, tenant: &str, db_name: &str) -> MetaStorageResult<u64> {
         let seq_dbi = self
             .database_lookup()
-            .get(db_name)?
-            .ok_or_else(|| ErrorCode::UnknownDatabase(db_name.to_string()))?;
+            .get(&(DatabaseLookupKey::new(tenant.to_string(), db_name.to_string())))?
+            .ok_or_else(|| AppError::from(UnknownDatabase::new(db_name, "get_database_id")))?;
 
         Ok(seq_dbi.data)
     }
 
-    async fn client_last_resp_update(
+    pub fn txn_get_database_id(
+        &self,
+        tenant: &str,
+        db_name: &str,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<u64> {
+        let txn_db_lookup = txn_tree.key_space::<DatabaseLookup>();
+        let seq_dbi = txn_db_lookup
+            .get(&(DatabaseLookupKey::new(tenant.to_string(), db_name.to_string())))?
+            .ok_or_else(|| {
+                AppError::UnknownDatabase(UnknownDatabase::new(
+                    db_name.to_string(),
+                    "txn_get_database_id".to_string(),
+                ))
+            })?;
+
+        Ok(seq_dbi.data)
+    }
+
+    fn txn_client_last_resp_update(
         &self,
         key: &str,
         value: (u64, AppliedState),
-    ) -> common_exception::Result<AppliedState> {
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<AppliedState> {
         let v = ClientLastRespValue {
             req_serial_num: value.0,
             res: value.1.clone(),
         };
-        let kvs = self.client_last_resps();
-        kvs.insert(&key.to_string(), &v).await?;
+        let txn_ks = txn_tree.key_space::<ClientLastResps>();
+        txn_ks.insert(&key.to_string(), &v)?;
 
         Ok(value.1)
     }
 
-    pub fn get_membership(&self) -> common_exception::Result<Option<MembershipConfig>> {
+    pub fn get_membership(&self) -> MetaStorageResult<Option<EffectiveMembership>> {
         let sm_meta = self.sm_meta();
         let mem = sm_meta
             .get(&StateMachineMetaKey::LastMembership)?
@@ -692,20 +882,16 @@ impl StateMachine {
         Ok(mem)
     }
 
-    pub fn get_last_applied(&self) -> common_exception::Result<LogId> {
+    pub fn get_last_applied(&self) -> MetaStorageResult<Option<LogId>> {
         let sm_meta = self.sm_meta();
         let last_applied = sm_meta
             .get(&LastApplied)?
-            .map(|x| x.try_into().expect("LogId"))
-            .unwrap_or_default();
+            .map(|x| x.try_into().expect("LogId"));
 
         Ok(last_applied)
     }
 
-    pub fn get_client_last_resp(
-        &self,
-        key: &str,
-    ) -> common_exception::Result<Option<(u64, AppliedState)>> {
+    pub fn get_client_last_resp(&self, key: &str) -> MetaResult<Option<(u64, AppliedState)>> {
         let client_last_resps = self.client_last_resps();
         let v: Option<ClientLastRespValue> = client_last_resps.get(&key.to_string())?;
 
@@ -716,34 +902,83 @@ impl StateMachine {
         Ok(Some((0, AppliedState::None)))
     }
 
+    pub fn txn_get_client_last_resp(
+        &self,
+        key: &str,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<(u64, AppliedState)> {
+        let client_last_resps = txn_tree.key_space::<ClientLastResps>();
+        let v = client_last_resps.get(&key.to_string())?;
+
+        if let Some(resp) = v {
+            return Ok((resp.req_serial_num, resp.res));
+        }
+        Ok((0, AppliedState::None))
+    }
+
     #[allow(dead_code)]
     fn list_node_ids(&self) -> Vec<NodeId> {
         let sm_nodes = self.nodes();
         sm_nodes.range_keys(..).expect("fail to list nodes")
     }
 
-    pub fn get_node(&self, node_id: &NodeId) -> common_exception::Result<Option<Node>> {
+    pub fn get_node(&self, node_id: &NodeId) -> MetaResult<Option<Node>> {
         let sm_nodes = self.nodes();
-        sm_nodes.get(node_id)
+        match sm_nodes.get(node_id) {
+            Ok(e) => Ok(e),
+            Err(e) => Err(e.into()),
+        }
     }
 
-    pub fn get_database_meta_by_id(&self, db_id: &u64) -> Result<SeqV<DatabaseMeta>, ErrorCode> {
-        let x = self
-            .databases()
-            .get(db_id)?
-            .ok_or_else(|| ErrorCode::UnknownDatabaseId(format!("database_id: {}", db_id)))?;
+    pub fn get_nodes(&self) -> MetaResult<Vec<Node>> {
+        let sm_nodes = self.nodes();
+        match sm_nodes.range_values(..) {
+            Ok(e) => Ok(e),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_database_meta_by_id(&self, db_id: &u64) -> MetaStorageResult<SeqV<DatabaseMeta>> {
+        let x = self.databases().get(db_id)?.ok_or_else(|| {
+            MetaStorageError::AppError(AppError::UnknownDatabaseId(UnknownDatabaseId::new(
+                *db_id,
+                "get_database_meta_by_id".to_string(),
+            )))
+        })?;
         Ok(x)
     }
 
-    pub fn get_database_meta_ver(&self) -> common_exception::Result<Option<u64>> {
+    pub fn txn_get_database_meta_by_id(
+        &self,
+        db_id: &u64,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<Option<SeqV<DatabaseMeta>>> {
+        let txn_databases = txn_tree.key_space::<Databases>();
+        let x = txn_databases.get(db_id)?;
+
+        Ok(x)
+    }
+
+    pub fn get_database_meta_ver(&self) -> MetaResult<Option<u64>> {
         let sequences = self.sequences();
         let res = sequences.get(&SEQ_DATABASE_META_ID.to_string())?;
         Ok(res.map(|x| x.0))
     }
 
     // TODO(xp): need a better name.
-    pub fn get_table_meta_by_id(&self, tid: &u64) -> Result<Option<SeqV<TableMeta>>, ErrorCode> {
+    pub fn get_table_meta_by_id(&self, tid: &u64) -> MetaResult<Option<SeqV<TableMeta>>> {
         let x = self.tables().get(tid)?;
+        Ok(x)
+    }
+
+    pub fn txn_get_table_meta_by_id(
+        &self,
+        tid: &u64,
+        txn_tree: &TransactionSledTree,
+    ) -> MetaStorageResult<Option<SeqV<TableMeta>>> {
+        let txn_table = txn_tree.key_space::<Tables>();
+        let x = txn_table.get(tid)?;
+
         Ok(x)
     }
 
@@ -752,7 +987,7 @@ impl StateMachine {
         table_id: u64,
         tbl: TableMeta,
         seq: &MatchSeq,
-    ) -> Result<Option<SeqV<TableMeta>>, ErrorCode> {
+    ) -> Result<Option<SeqV<TableMeta>>, MetaError> {
         let tables = self.tables();
         let (_prev, result) = self
             .sub_tree_upsert(tables, &table_id, seq, Operation::Update(tbl), None)
@@ -802,13 +1037,16 @@ impl StateMachine {
         &self,
         db_id: u64,
         name: &str,
-    ) -> Result<Option<SeqV<TableLookupValue>>, ErrorCode> {
-        self.table_lookup().get(
+    ) -> Result<Option<SeqV<TableLookupValue>>, MetaError> {
+        match self.table_lookup().get(
             &(TableLookupKey {
                 database_id: db_id,
                 table_name: name.to_string(),
             }),
-        )
+        ) {
+            Ok(e) => Ok(e),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 

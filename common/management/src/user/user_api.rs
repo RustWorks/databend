@@ -11,16 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 use common_exception::Result;
-use common_meta_types::AuthType;
+use common_meta_types::AuthInfo;
+use common_meta_types::GrantObject;
 use common_meta_types::SeqV;
 use common_meta_types::UserInfo;
-use common_meta_types::UserPrivilege;
+use common_meta_types::UserPrivilegeSet;
 
 #[async_trait::async_trait]
-pub trait UserMgrApi: Sync + Send {
+pub trait UserApi: Sync + Send {
     async fn add_user(&self, user_info: UserInfo) -> Result<u64>;
 
     async fn get_user(
@@ -36,16 +36,25 @@ pub trait UserMgrApi: Sync + Send {
         &self,
         username: String,
         hostname: String,
-        new_password: Option<Vec<u8>>,
-        new_auth: Option<AuthType>,
+        auth_info_args: AuthInfo,
         seq: Option<u64>,
     ) -> Result<Option<u64>>;
 
-    async fn set_user_privileges(
+    async fn grant_user_privileges(
         &self,
         username: String,
         hostname: String,
-        privileges: UserPrivilege,
+        object: GrantObject,
+        privileges: UserPrivilegeSet,
+        seq: Option<u64>,
+    ) -> Result<Option<u64>>;
+
+    async fn revoke_user_privileges(
+        &self,
+        username: String,
+        hostname: String,
+        object: GrantObject,
+        privileges: UserPrivilegeSet,
         seq: Option<u64>,
     ) -> Result<Option<u64>>;
 

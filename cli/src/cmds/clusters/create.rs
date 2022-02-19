@@ -24,11 +24,13 @@ use clap::AppSettings;
 use clap::Arg;
 use clap::ArgMatches;
 use clap::ValueHint;
+use common_meta_raft_store::config::get_default_raft_advertise_host;
+use common_meta_raft_store::config::get_default_raft_listen_host;
 use databend_meta::configs::Config as MetaConfig;
 use databend_query::configs::Config as QueryConfig;
 use lexical_util::num::AsPrimitive;
+use sysinfo::Pid;
 use sysinfo::ProcessExt;
-use sysinfo::Signal;
 use sysinfo::System;
 use sysinfo::SystemExt;
 
@@ -61,7 +63,7 @@ pub struct LocalBinaryPaths {
 async fn reconcile_local_meta(status: &mut Status) -> Result<()> {
     let s = System::new_all();
     if let Some((_, meta)) = status.get_local_meta_config() {
-        if meta.pid.is_none() || s.process(meta.pid.unwrap()).is_none() {
+        if meta.pid.is_none() || s.process(Pid::from(meta.pid.unwrap())).is_none() {
             return Err(CliError::Unknown(
                 "meta service process not found".to_string(),
             ));
@@ -76,7 +78,7 @@ async fn reconcile_local_meta(status: &mut Status) -> Result<()> {
 async fn reconcile_local_query(status: &mut Status) -> Result<()> {
     let s = System::new_all();
     for (_, query) in status.get_local_query_configs() {
-        if query.pid.is_none() || s.process(query.pid.unwrap()).is_none() {
+        if query.pid.is_none() || s.process(Pid::from(query.pid.unwrap())).is_none() {
             return Err(CliError::Unknown(
                 "query service process not found".to_string(),
             ));
@@ -148,14 +150,14 @@ pub fn generate_query_config() -> QueryConfig {
         config.query.flight_api_address = Status::find_unused_local_port()
     }
     if config.query.mysql_handler_host.is_empty() {
-        config.query.mysql_handler_host = "0.0.0.0".to_string();
+        config.query.mysql_handler_host = "127.0.0.1".to_string();
     }
     if config.query.clickhouse_handler_host.is_empty() {
-        config.query.clickhouse_handler_host = "0.0.0.0".to_string();
+        config.query.clickhouse_handler_host = "127.0.0.1".to_string();
     }
 
     if config.query.http_handler_host.is_empty() {
-        config.query.http_handler_host = "0.0.0.0".to_string();
+        config.query.http_handler_host = "127.0.0.1".to_string();
     }
     if !portpicker::is_free(config.query.mysql_handler_port) {
         config.query.mysql_handler_port = portpicker::pick_unused_port().unwrap();
@@ -170,7 +172,7 @@ pub fn generate_query_config() -> QueryConfig {
 }
 
 pub async fn provision_local_query_service(
-    mut status: &mut Status,
+    status: &mut Status,
     writer: &mut Writer,
     mut query_config: LocalQueryConfig,
     file_name: String,
@@ -179,7 +181,7 @@ pub async fn provision_local_query_service(
         Ok(_) => {
             assert!(query_config.get_pid().is_some());
             Status::save_local_config::<LocalQueryConfig>(
-                &mut status,
+                status,
                 "query".to_string(),
                 file_name,
                 &query_config.clone(),
@@ -244,7 +246,7 @@ pub fn generate_local_query_config(
     let mut config = generate_query_config();
     // configure meta address based on provisioned meta service
 
-    config.meta.meta_address = meta_config.clone().config.flight_api_address;
+    config.meta.meta_address = meta_config.clone().config.grpc_api_address;
 
     config.meta.meta_username = "root".to_string();
     config.meta.meta_password = "root".to_string();
@@ -452,7 +454,7 @@ impl CreateCommand {
         {
             config.admin_api_address = Status::find_unused_local_port()
         }
-        if config.flight_api_address.parse::<SocketAddr>().is_err()
+        if config.grpc_api_address.parse::<SocketAddr>().is_err()
             || !portpicker::is_free(
                 config
                     .admin_api_address
@@ -461,13 +463,16 @@ impl CreateCommand {
                     .port(),
             )
         {
-            config.flight_api_address = Status::find_unused_local_port()
+            config.grpc_api_address = Status::find_unused_local_port()
         }
         if !portpicker::is_free(config.raft_config.raft_api_port.as_u16()) {
             config.raft_config.raft_api_port = portpicker::pick_unused_port().unwrap() as u32;
         }
-        if config.raft_config.raft_api_host.is_empty() {
-            config.raft_config.raft_api_host = "0.0.0.0".to_string();
+        if config.raft_config.raft_listen_host.is_empty() {
+            config.raft_config.raft_listen_host = get_default_raft_listen_host();
+        }
+        if config.raft_config.raft_advertise_host.is_empty() {
+            config.raft_config.raft_advertise_host = get_default_raft_advertise_host();
         }
         config
     }
@@ -481,7 +486,7 @@ impl CreateCommand {
         if args.value_of("meta_address").is_some()
             && !args.value_of("meta_address").unwrap().is_empty()
         {
-            config.flight_api_address = args.value_of("meta_address").unwrap().to_string();
+            config.grpc_api_address = args.value_of("meta_address").unwrap().to_string();
         }
         config.log_level = args.value_of("log_level").unwrap().to_string();
         let log_base = format!("{}/logs", self.conf.clone().databend_dir);
@@ -528,7 +533,7 @@ impl CreateCommand {
                 )?;
                 writer.write_ok(format!(
                     "Successfully started meta service with rpc endpoint {}",
-                    meta_config.config.flight_api_address
+                    meta_config.config.grpc_api_address
                 ));
                 Ok(())
             }
@@ -647,14 +652,14 @@ impl CreateCommand {
                 .await
                 .expect("cannot stop current services");
             let s = System::new_all();
-            for elem in s.process_by_name("databend-meta") {
-                elem.kill(Signal::Term);
+            for elem in s.processes_by_name("databend-meta") {
+                elem.kill();
             }
-            for elem in s.process_by_name("databend-query") {
-                elem.kill(Signal::Term);
+            for elem in s.processes_by_name("databend-query") {
+                elem.kill();
             }
-            for elem in s.process_by_name("databend-dashboard") {
-                elem.kill(Signal::Term);
+            for elem in s.processes_by_name("databend-dashboard") {
+                elem.kill();
             }
         }
         if let Err(e) = reconcile_local(&mut status).await {
@@ -675,14 +680,14 @@ impl CreateCommand {
         }
         let s = System::new_all();
 
-        if !s.process_by_name("databend-meta").is_empty() {
+        if s.processes_by_name("databend-meta").count() != 0 {
             return Err(CliError::Unknown(
                 "❗ have installed databend-meta process before, please stop them and retry"
                     .parse()
                     .unwrap(),
             ));
         }
-        if !s.process_by_name("databend-query").is_empty() {
+        if s.processes_by_name("databend-query").count() != 0 {
             return Err(CliError::Unknown(
                 "❗ have installed databend-query process before, please stop them and retry"
                     .parse()
@@ -728,7 +733,7 @@ impl Command for CreateCommand {
             .arg(
                 Arg::new("profile")
                     .long("profile")
-                    .about("Profile for deployment, support local and cluster")
+                    .help("Profile for deployment, support local and cluster")
                     .required(false)
                     .takes_value(true)
                     .possible_values(&["local"]).default_value("local"),
@@ -736,14 +741,14 @@ impl Command for CreateCommand {
             .arg(
                 Arg::new("meta_address")
                     .long("meta-address")
-                    .about("Set endpoint to provide metastore service")
+                    .help("Set endpoint to provide metastore service")
                     .takes_value(true)
                     .env(databend_query::configs::config_meta::META_ADDRESS),
             )
             .arg(
                 Arg::new("log_level")
-                    .long("log-level")
-                    .about("Set logging level")
+                    .long("log_level")
+                    .help("Set logging level")
                     .takes_value(true)
                     .env(databend_query::configs::config_log::LOG_LEVEL)
                     .default_value("INFO"),
@@ -752,7 +757,7 @@ impl Command for CreateCommand {
                 Arg::new("version")
                     .long("version")
                     .takes_value(true)
-                    .about("Set databend version to run")
+                    .help("Set databend version to run")
                     .default_value("latest"),
             )
             .arg(
@@ -760,7 +765,7 @@ impl Command for CreateCommand {
                     .long("num-cpus")
                     .env(databend_query::configs::config_query::QUERY_NUM_CPUS)
                     .takes_value(true)
-                    .about("Set number of cpus for query instance to use")
+                    .help("Set number of cpus for query instance to use")
                     .default_value(""),
             )
             .arg(
@@ -768,7 +773,7 @@ impl Command for CreateCommand {
                     .long("query-cluster-id")
                     .env(databend_query::configs::config_query::QUERY_CLUSTER_ID)
                     .takes_value(true)
-                    .about("Set the cluster for query to work on")
+                    .help("Set the cluster for query to work on")
                     .default_value("test_cluster"),
             )
             .arg(
@@ -776,7 +781,7 @@ impl Command for CreateCommand {
                     .long("query-tenant-id")
                     .env(databend_query::configs::config_query::QUERY_TENANT_ID)
                     .takes_value(true)
-                    .about("Set the tenant id for query to work on")
+                    .help("Set the tenant id for query to work on")
                     .default_value("test"),
             )
             .arg(
@@ -784,7 +789,7 @@ impl Command for CreateCommand {
                     .long("mysql-handler-port")
                     .takes_value(true)
                     .env(databend_query::configs::config_query::QUERY_MYSQL_HANDLER_PORT)
-                    .about("Configure the port for mysql endpoint to run queries in mysql client")
+                    .help("Configure the port for mysql endpoint to run queries in mysql client")
                     .default_value("3307"),
             )
             .arg(
@@ -792,7 +797,7 @@ impl Command for CreateCommand {
                     .long("clickhouse-handler-port")
                     .env(databend_query::configs::config_query::QUERY_CLICKHOUSE_HANDLER_HOST)
                     .takes_value(true)
-                    .about("Configure the port clickhouse endpoint to run queries in clickhouse client")
+                    .help("Configure the port clickhouse endpoint to run queries in clickhouse client")
                     .default_value("9000"),
             )
             .arg(
@@ -800,7 +805,7 @@ impl Command for CreateCommand {
                     .long("storage-type")
                     .takes_value(true)
                     .env(databend_query::configs::config_storage::STORAGE_TYPE)
-                    .about("Set the storage medium to store datasets, support disk or s3 object storage ")
+                    .help("Set the storage medium to store datasets, support disk or s3 object storage ")
                     .possible_values(&["disk", "s3"]).default_value("disk"),
             )
             .arg(
@@ -808,14 +813,14 @@ impl Command for CreateCommand {
                     .long("disk-path")
                     .takes_value(true)
                     // .env(databend_query::configs::config_storage::DISK_STORAGE_DATA_PATH)
-                    .about("Set the root directory to store all datasets")
+                    .help("Set the root directory to store all datasets")
                     .value_hint(ValueHint::DirPath),
             )
             .arg(
                 Arg::new("force")
                     .long("force")
                     // .env(databend_query::configs::config_storage::DISK_STORAGE_DATA_PATH)
-                    .about("Delete existing cluster and install new cluster without check")
+                    .help("Delete existing cluster and install new cluster without check")
                     .takes_value(false),
             )
     }

@@ -12,7 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod arrays;
-mod data_array_filter;
-mod series;
+mod columns;
 mod types;

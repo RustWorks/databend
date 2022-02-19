@@ -32,16 +32,22 @@ jobs:
       - name: Rust setup
         run: |
           bash ./scripts/setup/dev_setup.sh
-          cargo install --version 0.1.16 cross
+          cargo install --version 0.2.1 cross
       - name: Build Binary
         run: |
           if [ ${{ matrix.config.os }} = "macos-11" ]; then
               rustup target add aarch64-apple-darwin
           fi
           if [ ${{ matrix.config.cross }} = true ]; then
-              cross build --release --target=${{ matrix.config.target }}
+              RUSTFLAGS="-C link-arg=-Wl,--compress-debug-sections=zlib-gabi" cross build --release --target=${{ matrix.config.target }}
           else
               cargo build --release --target=${{ matrix.config.target }}
+              if [ ${{ matrix.config.os }} = "ubuntu-latest" ]; then
+                  objcopy --compress-debug-sections=zlib-gnu ./target/${{ matrix.config.target }}/release/databend-query
+                  objcopy --compress-debug-sections=zlib-gnu ./target/${{ matrix.config.target }}/release/databend-benchmark
+                  objcopy --compress-debug-sections=zlib-gnu ./target/${{ matrix.config.target }}/release/databend-meta
+                  objcopy --compress-debug-sections=zlib-gnu ./target/${{ matrix.config.target }}/release/bendctl
+              fi
           fi
       - name: Get the version
         id: get_version

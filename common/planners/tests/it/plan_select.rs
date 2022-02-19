@@ -22,7 +22,7 @@ use common_planners::*;
 fn test_select_wildcard_plan() -> Result<()> {
     use pretty_assertions::assert_eq;
 
-    let schema = DataSchemaRefExt::create(vec![DataField::new("a", DataType::String, false)]);
+    let schema = DataSchemaRefExt::create(vec![DataField::new("a", Vu8::to_data_type())]);
     let plan = PlanBuilder::create(schema).project(&[col("a")])?.build()?;
     let select = PlanNode::Select(SelectPlan {
         input: Arc::new(plan),
