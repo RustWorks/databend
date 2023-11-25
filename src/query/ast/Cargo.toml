@@ -1,0 +1,45 @@
+[package]
+name = "common-ast"
+version = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+doctest = false
+
+[dependencies] # In alphabetical order
+# Workspace dependencies
+common-base = { path = "../../common/base" }
+common-exception = { path = "../../common/exception" }
+common-io = { path = "../../common/io" }
+common-meta-app = { path = "../../meta/app" }
+
+# Crates.io dependencies
+enum-as-inner = "0.5.1"
+ethnum = { workspace = true }
+fast-float = "0.2.0"
+itertools = "0.10.5"
+logos = "0.12.1"
+minitrace = { workspace = true }
+nom = "7.1.1"
+nom-rule = "0.3.0"
+ordered-float = { workspace = true }
+pratt = "0.4.0"
+pretty = "0.11.3"
+strsim = "0.10"
+strum = "0.24"
+strum_macros = "0.24"
+url = "2.3.1"
+
+[dev-dependencies]
+common-base = { path = "../../common/base" }
+criterion = "0.4"
+goldenfile = "1.4"
+pretty_assertions = "1.3.0"
+regex = "1.8.1"
+
+[[bench]]
+name = "bench"
+harness = false

@@ -1,0 +1,62 @@
+[package]
+name = "common-base"
+version = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+doctest = false
+test = false
+
+[features]
+tracing = ["tokio/tracing"]
+jemalloc = []
+disable_initial_exec_tls = ["tikv-jemalloc-sys/disable_initial_exec_tls"]
+memory-profiling = [
+    "tikv-jemalloc-sys/stats",
+    "tikv-jemalloc-sys/profiling",
+    "tikv-jemalloc-sys/unprefixed_malloc_on_supported_platforms",
+]
+
+[dependencies] # In alphabetical order
+# Workspace dependencies
+common-exception = { path = "../exception" }
+
+# GitHub dependencies
+
+# Crates.io dependencies
+async-backtrace = { git = "https://github.com/zhang2014/async-backtrace.git", rev = "e7e1b5f" }
+async-channel = "1.7.1"
+async-trait = "0.1.57"
+bytesize = "1.1.0"
+ctrlc = { version = "3.2.3", features = ["termination"] }
+enquote = "1.1.0"
+futures = "0.3.24"
+libc = "0.2.133"
+log = { workspace = true }
+logcall = { workspace = true }
+minitrace = { workspace = true }
+num_cpus = "1.13.1"
+once_cell = { workspace = true }
+parking_lot = "0.12"
+pin-project-lite = "0.2.9"
+pprof = { version = "0.11.1", features = [
+    "flamegraph",
+    "protobuf-codec",
+    "protobuf",
+] }
+regex = "1.8.1"
+semver = { workspace = true }
+serde = { workspace = true }
+state = "0.5"
+tikv-jemalloc-ctl = { workspace = true }
+tikv-jemalloc-sys = "0.5.2"
+tokio = { workspace = true }
+uuid = { version = "1.1.2", features = ["serde", "v4"] }
+
+[dev-dependencies]
+anyerror = { workspace = true }
+anyhow = { workspace = true }
+rand = "0.8.3"

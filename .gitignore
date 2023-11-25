@@ -1,5 +1,5 @@
 # IntelliJ project files
-.idea/*
+**/.idea/*
 
 # visual studio code files
 .vscode
@@ -9,8 +9,6 @@
 
 # Rust
 target/
-cli/e2e/bendctl
-.cargo/config.toml
 
 # OS related
 ### MacOS ###
@@ -34,11 +32,18 @@ _local_fs/
 stateless_test_data/
 **/_logs*/
 _data/
+_databend_data/
+_databend_meta/
 _cache/
 _tmp/
 tls/certs/
 .databend/
 checksums.txt
+distro/
+dist/
+test/
+tests/longrun/_*.csv
+tests/longrun/**/_*.csv
 
 # fuzz
 hfuzz_target/
@@ -54,6 +59,19 @@ docker/build-tool/rust-toolchain.toml
 # python
 venv/
 *.pyc
+.venv/
 __pycache__/
+.python-version
 
 *.zip
+
+# tpch data set
+benchmark/tpch/data
+# clickbench results
+benchmark/clickbench/results
+
+# direnv test files
+.envrc
+
+# z3
+**/.z3-trace

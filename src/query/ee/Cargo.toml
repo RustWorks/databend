@@ -1,0 +1,61 @@
+[package]
+name = "enterprise-query"
+description = "A real-time Cloud Distributed Query Engine"
+version = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+# Workspace dependencies
+aggregating-index = { path = "../ee_features/aggregating_index" }
+async-backtrace = { workspace = true }
+background-service = { path = "../ee_features/background_service" }
+common-arrow = { path = "../../common/arrow" }
+common-base = { path = "../../common/base" }
+common-catalog = { path = "../catalog" }
+common-config = { path = "../config" }
+common-exception = { path = "../../common/exception" }
+common-expression = { path = "../expression" }
+common-io = { path = "../../common/io" }
+common-license = { path = "../../common/license" }
+common-meta-api = { path = "../../meta/api" }
+common-meta-app = { path = "../../meta/app" }
+common-meta-store = { path = "../../meta/store" }
+common-sql = { path = "../sql" }
+common-storages-fuse = { path = "../storages/fuse" }
+common-storages-stream = { path = "../storages/stream" }
+common-tracing = { path = "../../common/tracing" }
+common-users = { path = "../users" }
+data-mask-feature = { path = "../ee_features/data_mask" }
+databend-query = { path = "../service" }
+jsonb = { workspace = true }
+opendal = { workspace = true }
+storage-encryption = { path = "../ee_features/storage_encryption" }
+storages-common-cache = { path = "../storages/common/cache" }
+storages-common-table-meta = { path = "../storages/common/table_meta" }
+stream-handler = { path = "../ee_features/stream_handler" }
+vacuum-handler = { path = "../ee_features/vacuum_handler" }
+virtual-column = { path = "../ee_features/virtual_column" }
+
+arrow-array = { workspace = true }
+async-trait = "0.1.57"
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+dashmap = "5.4"
+futures = "0.3.24"
+futures-util = { workspace = true }
+
+jwt-simple = "0.11.0"
+log = { workspace = true }
+tempfile = "3.4.0"
+
+[dev-dependencies]
+
+[build-dependencies]
+common-building = { path = "../../common/building" }

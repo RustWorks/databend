@@ -1,73 +1,50 @@
-name: 'Check'
-description: 'Check will do all essential checks'
+name: "Check"
+description: "Check will do all essential checks"
 inputs:
   github_token:
-    description: "Github Token"
+    description: "GitHub Token"
     required: true
 runs:
   using: "composite"
   steps:
-    - name: Maximize build space
-      uses: ./.github/actions/cleanup
-
-    - uses: arduino/setup-protoc@v1
+    - name: Setup Build Tool
+      uses: ./.github/actions/setup_build_tool
       with:
-        version: '3.x'
-        repo-token: ${{ inputs.github_token }}
+        bypass_env_vars: RUSTFLAGS,RUST_LOG,GITHUB_TOKEN
 
-    # If you need to reset the cache version, increment the number after `v`
-    - uses: Swatinem/rust-cache@v1
-      with:
-        sharedKey: base-v1
+    - name: Check Apache License Header
+      uses: korandoru/hawkeye@v2
 
-    - name: Format
-      uses: actions-rs/cargo@v1
+    - name: Check Elastic License Header
+      uses: korandoru/hawkeye@v2
       with:
-        command: fmt
-        args: --all -- --check
-
-    - name: Clippy
-      uses: actions-rs/cargo@v1
-      with:
-        command: clippy
-        args: --tests -- -D warnings
-
-    - name: Check License Header
-      uses: apache/skywalking-eyes@v0.2.0
-      env:
-        GITHUB_TOKEN: ${{ inputs.github_token }}
-      with:
-        log: info
+        config: licenserc-ee.toml
 
     - name: YAML Lint
-      uses: ibiqlik/action-yamllint@v3
-      with:
-        file_or_dir: ./
-        config_file: .yamllint.yml
+      shell: bash
+      run: make lint-yaml
 
-    - name: Install cargo-audit
-      uses: actions-rs/cargo@v1
-      if: "!contains(github.event.head_commit.message, 'skip audit')"
-      with:
-        command: install
-        args: cargo-audit
+    - name: Format
+      shell: bash
+      run: cargo fmt --all -- --check
+
+    - name: Check typos
+      shell: bash
+      run: typos
+
+    - name: Check unused deps
+      shell: bash
+      run: cargo machete
+
+    - name: Check toml format
+      shell: bash
+      run: taplo fmt --check
 
     - name: Audit dependencies
-      uses: actions-rs/cargo@v1
+      shell: bash
       if: "!contains(github.event.head_commit.message, 'skip audit')"
-      with:
-        command: audit
+      run: cargo audit --db ./target/advisory-db
 
-    - name: Install cargo-udeps
-      uses: actions-rs/cargo@v1
-      if: "!contains(github.event.head_commit.message, 'skip udeps')"
-      with:
-        command: install
-        args: cargo-udeps --locked
-
-    - name: Check udeps
-      uses: actions-rs/cargo@v1
-      if: "!contains(github.event.head_commit.message, 'skip udeps')"
-      with:
-        command: udeps
-        args: --workspace
+    - name: Clippy
+      shell: bash
+      run: cargo -Zgitoxide=fetch,shallow-index,shallow-deps clippy --workspace --all-targets --all-features -- -D warnings

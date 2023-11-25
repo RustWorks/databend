@@ -1,0 +1,81 @@
+name: Bindings Python
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - ".github/workflows/bindings.python.yml"
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag to release
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: [self-hosted, X64, Linux, 8c16g, gcp]
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/build_bindings_python
+        with:
+          target: ${{ matrix.target }}
+          version: ${{ inputs.tag }}
+      - name: upload
+        if: inputs.tag
+        uses: actions/upload-artifact@v3
+        with:
+          name: python
+          path: src/bendpy/dist/*.whl
+
+  macos:
+    if: inputs.tag
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/build_bindings_python
+        with:
+          target: ${{ matrix.target }}
+          version: ${{ inputs.tag }}
+      - name: upload
+        if: inputs.tag
+        uses: actions/upload-artifact@v3
+        with:
+          name: python
+          path: src/bendpy/dist/*.whl
+
+  publish:
+    if: inputs.tag
+    name: Publish
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v3
+        with:
+          name: python
+          path: src/bendpy/dist
+      - name: Publish to PyPI
+        timeout-minutes: 10
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          packages-dir: src/bendpy/dist

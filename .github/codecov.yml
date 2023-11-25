@@ -3,11 +3,9 @@ ignore:
   - .cargo/*
   - .github/*
   - docker/*
-  - docs/*
   - scripts/*
   - tests/*
   - tools/*
-  - website/*
 
 coverage:
   precision: 0
@@ -16,9 +14,9 @@ coverage:
   status:
     project:
       default:
-        enabled: yes
+        enabled: true
         threshold: 1%
     patch:
       default:
-        enabled: yes
+        enabled: true
         threshold: 1%
